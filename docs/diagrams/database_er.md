@@ -4,13 +4,14 @@ The database is built on PostgreSQL (Supabase) and follows a relational structur
 
 ```mermaid
 erDiagram
+
     PROFILES ||--o{ SESSIONS : performs
     PROFILES ||--o{ ANTHROPOMETRY_PROFILES : has
 
     PROFILES {
         uuid id PK
         string email
-        user_role role
+        enum role
         timestamp created_at
         jsonb metadata
     }
@@ -23,7 +24,7 @@ erDiagram
         float height_cm
         float weight_kg
         jsonb segment_lengths
-        anthropometry_model model
+        enum model
         timestamp valid_from
         timestamp valid_to
         boolean is_active
@@ -37,7 +38,7 @@ erDiagram
         uuid user_id FK
         uuid anthropometry_profile_id FK
         string exercise
-        capture_mode capture_mode
+        enum capture_mode
         boolean has_depth
         int fps
         string model_version
@@ -47,7 +48,7 @@ erDiagram
     LANDMARKS {
         uuid id PK
         uuid session_id FK
-        coordinate_system coordinate_system
+        enum coordinate_system
         jsonb data
     }
 
@@ -55,7 +56,7 @@ erDiagram
         uuid id PK
         uuid session_id FK
         string metric_type
-        biomech_phase phase
+        enum phase
         float value
         string unit
         float timestamp
