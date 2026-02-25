@@ -115,6 +115,29 @@ CREATE INDEX idx_anthropometry_active
 
 
 /************************************************************
+ * PROFILE_RELATIONS
+ * Conector entre usuarios (Coach -> Atleta)
+ ************************************************************/
+
+CREATE TABLE profile_relations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  coach_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  athlete_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  status text NOT NULL DEFAULT 'active', -- active, pending, revoked
+  permissions text NOT NULL DEFAULT 'view_only', -- view_only, manage_sessions
+  created_at timestamptz DEFAULT now(),
+  
+  -- Constraint: Cannot be your own coach
+  CONSTRAINT no_self_relation CHECK (coach_id <> athlete_id),
+  -- Constraint: Unique pair
+  UNIQUE(coach_id, athlete_id)
+);
+
+CREATE INDEX idx_profile_relations_coach ON profile_relations(coach_id, status);
+CREATE INDEX idx_profile_relations_athlete ON profile_relations(athlete_id, status);
+
+
+/************************************************************
  * SESSIONS
  * Evento de captura biomecánica
  * Referencia al perfil antropométrico vigente
@@ -203,10 +226,16 @@ CREATE INDEX idx_metrics_type
 
 
 /************************************************************
- * TRIGGER
- * Garantiza un solo perfil antropométrico activo por usuario
+ * FUNCTIONS & TRIGGERS
  ************************************************************/
 
+-- Helper: Get current user role
+CREATE OR REPLACE FUNCTION get_user_role()
+RETURNS user_role AS $$
+  SELECT role FROM profiles WHERE id = auth.uid();
+$$ LANGUAGE sql STABLE;
+
+-- Trigger: Ensure single active anthropometry
 CREATE OR REPLACE FUNCTION enforce_single_active_anthropometry()
 RETURNS trigger AS $$
 BEGIN
@@ -227,51 +256,87 @@ BEFORE INSERT OR UPDATE ON anthropometry_profiles
 FOR EACH ROW
 EXECUTE FUNCTION enforce_single_active_anthropometry();
 
+-- Trigger: Guest session limits
+CREATE OR REPLACE FUNCTION check_guest_session_limit()
+RETURNS trigger AS $$
+BEGIN
+  IF get_user_role() = 'guest' THEN
+    IF (SELECT count(*) FROM sessions WHERE user_id = auth.uid()) >= 3 THEN
+      RAISE EXCEPTION 'Guest session limit reached (Max: 3)';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_guest_session_limit
+BEFORE INSERT ON sessions
+FOR EACH ROW
+EXECUTE FUNCTION check_guest_session_limit();
+
 
 /************************************************************
- * ROW LEVEL SECURITY (BASE)
- * Se afinan luego por rol
+ * ROW LEVEL SECURITY (POLICIES)
  ************************************************************/
 
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE anthropometry_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE profile_relations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE landmarks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE metrics ENABLE ROW LEVEL SECURITY;
 
+-- Profiles
+CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (id = auth.uid());
+CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (id = auth.uid());
+CREATE POLICY "Admin can view all profiles" ON profiles FOR SELECT USING (get_user_role() = 'admin');
 
-/************************************************************
- * POLÍTICA BASE DE EJEMPLO (SESSIONS)
- * Cada usuario solo accede a sus datos
- ************************************************************/
+-- Anthropometry
+CREATE POLICY "Users manage own anthropometry" ON anthropometry_profiles FOR ALL USING (
+  user_id = auth.uid() OR get_user_role() = 'admin'
+);
 
-CREATE POLICY "Users can manage own sessions"
+-- Relations
+CREATE POLICY "Users can see their own relations" ON profile_relations FOR SELECT 
+USING (coach_id = auth.uid() OR athlete_id = auth.uid() OR get_user_role() = 'admin');
+
+-- Sessions (The Core Policy for shared access)
+CREATE POLICY "Users and their Coaches can access sessions"
 ON sessions
 FOR ALL
-USING (user_id = auth.uid());
+USING (
+  user_id = auth.uid()
+  OR get_user_role() = 'admin'
+  OR EXISTS (
+    SELECT 1 FROM profile_relations 
+    WHERE coach_id = auth.uid() 
+    AND athlete_id = sessions.user_id 
+    AND status = 'active'
+  )
+);
 
-CREATE POLICY "Users can manage own profiles"
-ON profiles
-FOR ALL
-USING (id = auth.uid());
+-- Landmarks (Indirect via Sessions)
+CREATE POLICY "Users access landmarks via session ownership"
+ON landmarks FOR ALL USING (
+  EXISTS (
+    SELECT 1 FROM sessions s 
+    WHERE s.id = landmarks.session_id 
+    AND (s.user_id = auth.uid() OR get_user_role() = 'admin' OR EXISTS (
+      SELECT 1 FROM profile_relations pr 
+      WHERE pr.coach_id = auth.uid() AND pr.athlete_id = s.user_id AND pr.status = 'active'
+    ))
+  )
+);
 
-CREATE POLICY "Users can manage own anthropometry"
-ON anthropometry_profiles
-FOR ALL
-USING (user_id = auth.uid());
-
-CREATE POLICY "Users can manage landmarks of own sessions"
-ON landmarks
-FOR ALL
-USING (EXISTS (
-  SELECT 1 FROM sessions s 
-  WHERE s.id = landmarks.session_id AND s.user_id = auth.uid()
-));
-
-CREATE POLICY "Users can manage metrics of own sessions"
-ON metrics
-FOR ALL
-USING (EXISTS (
-  SELECT 1 FROM sessions s 
-  WHERE s.id = metrics.session_id AND s.user_id = auth.uid()
-));
+-- Metrics (Indirect via Sessions)
+CREATE POLICY "Users access metrics via session ownership"
+ON metrics FOR ALL USING (
+  EXISTS (
+    SELECT 1 FROM sessions s 
+    WHERE s.id = metrics.session_id 
+    AND (s.user_id = auth.uid() OR get_user_role() = 'admin' OR EXISTS (
+      SELECT 1 FROM profile_relations pr 
+      WHERE pr.coach_id = auth.uid() AND pr.athlete_id = s.user_id AND pr.status = 'active'
+    ))
+  )
+);

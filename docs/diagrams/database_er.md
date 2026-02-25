@@ -7,6 +7,7 @@ erDiagram
 
     PROFILES ||--o{ SESSIONS : performs
     PROFILES ||--o{ ANTHROPOMETRY_PROFILES : has
+    PROFILES ||--o{ PROFILE_RELATIONS : coach_or_athlete
 
     PROFILES {
         uuid id PK
@@ -14,6 +15,15 @@ erDiagram
         enum role
         timestamp created_at
         jsonb metadata
+    }
+
+    PROFILE_RELATIONS {
+        uuid id PK
+        uuid coach_id FK
+        uuid athlete_id FK
+        string status
+        string permissions
+        timestamp created_at
     }
 
     ANTHROPOMETRY_PROFILES ||--o{ SESSIONS : used_in
