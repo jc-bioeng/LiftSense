@@ -233,8 +233,7 @@ CREATE INDEX idx_metrics_type
 CREATE OR REPLACE FUNCTION get_user_role()
 RETURNS user_role AS $$
   SELECT role FROM profiles WHERE id = auth.uid();
-$$ LANGUAGE sql STABLE
-SET search_path = public;
+$$ LANGUAGE sql STABLE;
 
 -- Trigger: Ensure single active anthropometry
 CREATE OR REPLACE FUNCTION enforce_single_active_anthropometry()
@@ -250,8 +249,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql
-SET search_path = public;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_single_active_anthropometry
 BEFORE INSERT OR UPDATE ON anthropometry_profiles
@@ -269,8 +267,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql
-SET search_path = public;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_guest_session_limit
 BEFORE INSERT ON sessions
