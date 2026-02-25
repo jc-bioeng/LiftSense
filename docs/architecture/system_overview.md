@@ -37,7 +37,7 @@ graph TD
 ## Description of Components
 
 ### 1. Flutter Frontend
-- **Responsibilities**: Video capture, real-time landmark visualization (MediaPipe), user session management, and dashboard visualization.
+- **Responsibilities**: Video capture, real-time landmark visualization (MediaPipe), profile and session management, and dashboard visualization.
 - **Technologies**: Flutter, MediaPipe, Supabase Flutter SDK.
 
 ### 2. Python Backend (FastAPI)
@@ -47,7 +47,7 @@ graph TD
 
 ### 3. Supabase
 - **Authentication**: Handles user signup, login, and role-based access (user, trainer, researcher).
-- **PostgreSQL Database**: Stores user metadata, session details, landmarks, and calculated metrics.
+- **PostgreSQL Database**: Stores profile metadata, session details, landmarks, and calculated metrics.
 - **Storage**: Holds raw video captures or uploaded files.
 
 ### 4. Biomech Engine
