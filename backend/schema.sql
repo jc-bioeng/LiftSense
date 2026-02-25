@@ -232,15 +232,16 @@ CREATE INDEX idx_metrics_type
 -- Helper: Get current user role
 CREATE OR REPLACE FUNCTION get_user_role()
 RETURNS user_role AS $$
-  SELECT role FROM profiles WHERE id = auth.uid();
-$$ LANGUAGE sql STABLE;
+  SELECT role FROM public.profiles WHERE id = auth.uid();
+$$ LANGUAGE sql STABLE
+SET search_path = public;
 
 -- Trigger: Ensure single active anthropometry
 CREATE OR REPLACE FUNCTION enforce_single_active_anthropometry()
 RETURNS trigger AS $$
 BEGIN
   IF NEW.is_active THEN
-    UPDATE anthropometry_profiles
+    UPDATE public.anthropometry_profiles
     SET is_active = false,
         valid_to = now()
     WHERE user_id = NEW.user_id
@@ -249,7 +250,8 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+SET search_path = public;
 
 CREATE TRIGGER trg_single_active_anthropometry
 BEFORE INSERT OR UPDATE ON anthropometry_profiles
@@ -260,14 +262,15 @@ EXECUTE FUNCTION enforce_single_active_anthropometry();
 CREATE OR REPLACE FUNCTION check_guest_session_limit()
 RETURNS trigger AS $$
 BEGIN
-  IF get_user_role() = 'guest' THEN
-    IF (SELECT count(*) FROM sessions WHERE user_id = auth.uid()) >= 3 THEN
+  IF public.get_user_role() = 'guest' THEN
+    IF (SELECT count(*) FROM public.sessions WHERE user_id = auth.uid()) >= 3 THEN
       RAISE EXCEPTION 'Guest session limit reached (Max: 3)';
     END IF;
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+SET search_path = public;
 
 CREATE TRIGGER trg_guest_session_limit
 BEFORE INSERT ON sessions

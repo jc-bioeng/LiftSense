@@ -5,12 +5,13 @@ Welcome to the LiftSense architecture documentation. This directory contains det
 ## Core Documentation
 
 1. **[System Overview](system_overview.md)**: High-level architecture, components, and technology stack.
-2. **[Database Schema](file:///c:/flutter_projects/LiftSense/backend/supabase/migrations/20260222213000_schema.sql)**: (SQL) The primary PostgreSQL definition for Supabase.
+2. **[Database Schema](../../backend/schema.sql)**: (SQL) The primary PostgreSQL definition for Supabase.
 
-## UML Diagrams
+## UML & Logic Diagrams
 
-- **[Database ER Diagram](../diagrams/database_er.md)**: Visual representation of tables and relationships.
-- **[Process Flow](../diagrams/process_flow.md)**: Sequence diagram of a biomechanical analysis lifecycle.
+1. **[Database ER Diagram](../diagrams/database_er.md)**: Main entity relationships.
+2. **[RLS Flow Diagram](../diagrams/rls_flow.md)**: Logic schematic for security and access control.
+3. **[Process Flow](../diagrams/process_flow.md)**: (TBD) Sequence of capture to analysis.
 
 ## Architectural Principles
 
