@@ -4,43 +4,50 @@ The database is built on PostgreSQL (Supabase) and follows a relational structur
 
 ```mermaid
 erDiagram
-    USERS ||--o{ SESSIONS : "performs"
-    USERS {
+    PROFILES ||--o{ SESSIONS : performs
+    PROFILES ||--o{ ANTHROPOMETRY_PROFILES : has
+
+    PROFILES {
         uuid id PK
         string email
-        enum role
+        user_role role
         timestamp created_at
         jsonb metadata
     }
 
-    SESSIONS ||--o{ ANTHROPOMETRY : "has"
-    SESSIONS ||--o{ LANDMARKS : "contains"
-    SESSIONS ||--o{ METRICS : "results in"
-    SESSIONS ||--o{ EXPERIMENTS : "validated by"
+    ANTHROPOMETRY_PROFILES ||--o{ SESSIONS : used_in
+
+    ANTHROPOMETRY_PROFILES {
+        uuid id PK
+        uuid user_id FK
+        float height_cm
+        float weight_kg
+        jsonb segment_lengths
+        anthropometry_model model
+        timestamp valid_from
+        timestamp valid_to
+        boolean is_active
+    }
+
+    SESSIONS ||--o{ LANDMARKS : contains
+    SESSIONS ||--o{ METRICS : results_in
+
     SESSIONS {
         uuid id PK
         uuid user_id FK
+        uuid anthropometry_profile_id FK
         string exercise
-        enum capture_mode
+        capture_mode capture_mode
         boolean has_depth
         int fps
         string model_version
         timestamp created_at
     }
 
-    ANTHROPOMETRY {
-        uuid id PK
-        uuid session_id FK
-        float height_cm
-        float weight_kg
-        jsonb segment_lengths
-        enum model
-    }
-
     LANDMARKS {
         uuid id PK
         uuid session_id FK
-        enum coordinate_system
+        coordinate_system coordinate_system
         jsonb data
     }
 
@@ -48,18 +55,9 @@ erDiagram
         uuid id PK
         uuid session_id FK
         string metric_type
-        enum phase
+        biomech_phase phase
         float value
         string unit
         float timestamp
-    }
-
-    EXPERIMENTS {
-        uuid id PK
-        uuid session_id FK
-        string variable
-        jsonb reference_data
-        jsonb estimated_data
-        jsonb validation_metrics
     }
 ```

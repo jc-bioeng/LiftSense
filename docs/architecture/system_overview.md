@@ -46,8 +46,9 @@ graph TD
 - **Technologies**: FastAPI, NumPy, SciPy, Pandas.
 
 ### 3. Supabase
-- **Authentication**: Handles user signup, login, and role-based access (user, trainer, researcher).
-- **PostgreSQL Database**: Stores profile metadata, session details, landmarks, and calculated metrics.
+- **Authentication**: Handles user signup, login, and role-based access (admin, coach, athlete, guest).
+- **PostgreSQL Database**: Stores profile metadata, session details, landmarks, and calculated metrics. Features **Row Level Security (RLS)** for data isolation.
+- **Automated Versioning**: SQL triggers manage active anthropometry profiles to maintain historical biometric integrity.
 - **Storage**: Holds raw video captures or uploaded files.
 
 ### 4. Biomech Engine
