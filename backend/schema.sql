@@ -52,6 +52,23 @@ CREATE TYPE anthropometry_model AS ENUM (
   'ml_estimated'
 );
 
+-- Estado de la suscripción
+CREATE TYPE subscription_status AS ENUM (
+  'active',
+  'trial',
+  'canceled',
+  'past_due'
+);
+
+-- Tipo de plan de suscripción
+CREATE TYPE plan_type AS ENUM (
+  'free',
+  'pro',
+  'coach_starter',
+  'coach_pro',
+  'coach_elite'
+);
+
 
 /************************************************************
  * PROFILES
@@ -71,6 +88,10 @@ CREATE TABLE profiles (
 
   -- Metadata libre (preferencias, flags, etc.)
   metadata jsonb DEFAULT '{}',
+
+  -- Suscripción y Planes
+  subscription_status subscription_status NOT NULL DEFAULT 'trial',
+  plan_type plan_type NOT NULL DEFAULT 'free',
 
   created_at timestamptz DEFAULT now()
 );
@@ -258,13 +279,16 @@ BEFORE INSERT OR UPDATE ON anthropometry_profiles
 FOR EACH ROW
 EXECUTE FUNCTION enforce_single_active_anthropometry();
 
--- Trigger: Guest session limits
+-- Trigger: Guest session limits (Daily Limit)
 CREATE OR REPLACE FUNCTION check_guest_session_limit()
 RETURNS trigger AS $$
 BEGIN
   IF public.get_user_role() = 'guest' THEN
-    IF (SELECT count(*) FROM public.sessions WHERE user_id = auth.uid()) >= 3 THEN
-      RAISE EXCEPTION 'Guest session limit reached (Max: 3)';
+    -- Limit 2 sessions per day (last 24 hours)
+    IF (SELECT count(*) FROM public.sessions 
+        WHERE user_id = auth.uid() 
+        AND created_at > now() - interval '24 hours') >= 2 THEN
+      RAISE EXCEPTION 'Guest daily session limit reached (Max: 2 per 24h)';
     END IF;
   END IF;
   RETURN NEW;
@@ -276,6 +300,64 @@ CREATE TRIGGER trg_guest_session_limit
 BEFORE INSERT ON sessions
 FOR EACH ROW
 EXECUTE FUNCTION check_guest_session_limit();
+
+-- Trigger: Coach Athlete Limit
+-- SECURITY DEFINER allows the trigger to validate coach plan/status bypassing RLS.
+CREATE OR REPLACE FUNCTION check_coach_athlete_limit()
+RETURNS trigger AS $$
+DECLARE
+  v_plan plan_type;
+  v_status subscription_status;
+  v_current_count int;
+  v_limit int;
+BEGIN
+  -- Get coach's plan and subscription status (Bypassing RLS for validation)
+  SELECT plan_type, subscription_status INTO v_plan, v_status 
+  FROM public.profiles WHERE id = NEW.coach_id;
+
+  -- Block if subscription is not active or trial
+  IF v_status NOT IN ('active', 'trial') OR v_status IS NULL THEN
+    RAISE EXCEPTION 'Coach subscription is % (must be active or trial)', COALESCE(v_status::text, 'unknown')
+    USING ERRCODE = 'P0002';
+  END IF;
+
+  -- Only enforce capacity for coach plans
+  IF v_plan NOT IN ('coach_starter', 'coach_pro', 'coach_elite') THEN
+    RETURN NEW;
+  END IF;
+
+  -- Elite is unlimited
+  IF v_plan = 'coach_elite' THEN
+    RETURN NEW;
+  END IF;
+
+  -- Map limits
+  v_limit := CASE 
+    WHEN v_plan = 'coach_starter' THEN 5
+    WHEN v_plan = 'coach_pro' THEN 20
+    WHEN v_plan = 'coach_elite' THEN 999999
+    ELSE 0
+  END;
+
+  -- Count active relations
+  SELECT count(*) INTO v_current_count 
+  FROM public.profile_relations 
+  WHERE coach_id = NEW.coach_id AND status = 'active';
+
+  IF v_current_count >= v_limit THEN
+    RAISE EXCEPTION 'Coach athlete limit reached for plan % (Max: %)', v_plan, v_limit
+    USING ERRCODE = 'P0001';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_catalog;
+
+CREATE TRIGGER trg_coach_athlete_limit
+BEFORE INSERT ON profile_relations
+FOR EACH ROW
+EXECUTE FUNCTION check_coach_athlete_limit();
 
 
 /************************************************************
@@ -289,57 +371,64 @@ ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE landmarks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE metrics ENABLE ROW LEVEL SECURITY;
 
--- Profiles
-CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (id = auth.uid());
-CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (id = auth.uid());
-CREATE POLICY "Admin can view all profiles" ON profiles FOR SELECT USING (get_user_role() = 'admin');
+-- Profiles: Unified Access (Owner or Admin)
+CREATE POLICY "profiles_main_policy" ON profiles
+FOR ALL TO authenticated USING (id = (SELECT auth.uid()) OR get_user_role() = 'admin')
+WITH CHECK (id = (SELECT auth.uid()) OR get_user_role() = 'admin');
 
--- Anthropometry
-CREATE POLICY "Users manage own anthropometry" ON anthropometry_profiles FOR ALL USING (
-  user_id = auth.uid() OR get_user_role() = 'admin'
-);
+-- Anthropometry: Unified Access (Owner or Admin)
+CREATE POLICY "anthro_main_policy" ON anthropometry_profiles
+FOR ALL TO authenticated USING (user_id = (SELECT auth.uid()) OR get_user_role() = 'admin')
+WITH CHECK (user_id = (SELECT auth.uid()) OR get_user_role() = 'admin');
 
--- Relations
-CREATE POLICY "Users can see their own relations" ON profile_relations FOR SELECT 
-USING (coach_id = auth.uid() OR athlete_id = auth.uid() OR get_user_role() = 'admin');
+-- Relations: Shared view for involved parties
+CREATE POLICY "relations_main_policy" ON profile_relations 
+FOR ALL TO authenticated USING (coach_id = (SELECT auth.uid()) OR athlete_id = (SELECT auth.uid()) OR get_user_role() = 'admin');
 
--- Sessions (The Core Policy for shared access)
-CREATE POLICY "Users and their Coaches can access sessions"
+-- Sessions: Unified Core Policy (Owner, Admin, or Active Coach)
+CREATE POLICY "sessions_main_policy"
 ON sessions
-FOR ALL
+FOR ALL TO authenticated
 USING (
-  user_id = auth.uid()
+  user_id = (SELECT auth.uid())
   OR get_user_role() = 'admin'
   OR EXISTS (
-    SELECT 1 FROM profile_relations 
-    WHERE coach_id = auth.uid() 
+    SELECT 1 FROM public.profile_relations 
+    WHERE coach_id = (SELECT auth.uid()) 
     AND athlete_id = sessions.user_id 
     AND status = 'active'
   )
 );
 
--- Landmarks (Indirect via Sessions)
-CREATE POLICY "Users access landmarks via session ownership"
-ON landmarks FOR ALL USING (
+-- Landmarks & Metrics: Inherited via Session access
+CREATE POLICY "landmarks_main_policy"
+ON landmarks FOR ALL TO authenticated USING (
   EXISTS (
     SELECT 1 FROM sessions s 
     WHERE s.id = landmarks.session_id 
-    AND (s.user_id = auth.uid() OR get_user_role() = 'admin' OR EXISTS (
-      SELECT 1 FROM profile_relations pr 
-      WHERE pr.coach_id = auth.uid() AND pr.athlete_id = s.user_id AND pr.status = 'active'
-    ))
+    AND (
+      s.user_id = (SELECT auth.uid()) 
+      OR get_user_role() = 'admin' 
+      OR EXISTS (
+        SELECT 1 FROM public.profile_relations pr 
+        WHERE pr.coach_id = (SELECT auth.uid()) AND pr.athlete_id = s.user_id AND pr.status = 'active'
+      )
+    )
   )
 );
 
--- Metrics (Indirect via Sessions)
-CREATE POLICY "Users access metrics via session ownership"
-ON metrics FOR ALL USING (
+CREATE POLICY "metrics_main_policy"
+ON metrics FOR ALL TO authenticated USING (
   EXISTS (
     SELECT 1 FROM sessions s 
     WHERE s.id = metrics.session_id 
-    AND (s.user_id = auth.uid() OR get_user_role() = 'admin' OR EXISTS (
-      SELECT 1 FROM profile_relations pr 
-      WHERE pr.coach_id = auth.uid() AND pr.athlete_id = s.user_id AND pr.status = 'active'
-    ))
+    AND (
+      s.user_id = (SELECT auth.uid()) 
+      OR get_user_role() = 'admin' 
+      OR EXISTS (
+        SELECT 1 FROM public.profile_relations pr 
+        WHERE pr.coach_id = (SELECT auth.uid()) AND pr.athlete_id = s.user_id AND pr.status = 'active'
+      )
+    )
   )
 );

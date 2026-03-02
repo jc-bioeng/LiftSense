@@ -13,6 +13,8 @@ erDiagram
         uuid id PK
         string email
         enum role
+        enum subscription_status
+        enum plan_type
         timestamp created_at
         jsonb metadata
     }
