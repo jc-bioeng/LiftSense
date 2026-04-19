@@ -1,5 +1,21 @@
 {
-  "appTitle": "LifeSense",
-  "welcomeMessage": "Bienvenido al análisis biomecánico",
-  "startAnalysis": "Iniciar Análisis"
+  "appTitle": "LIFTSENSE",
+  "initSquatRecord": "INICIAR REGISTRO",
+  "kinematicExtraction": "Extracción Cinemática // Plano Sagital",
+  "metaTrends": "META-TENDENCIAS // ÚLTIMOS 7 DÍAS",
+  "avgMaxInclination": "INC. MÁX PROMEDIO",
+  "improvement": "MEJORA",
+  "operationalHistory": "HISTORIAL OPERATIVO",
+  "maxTrunk": "TRONCO MÁX",
+  "settings": "Opciones",
+  "language": "Idioma",
+  "selectLanguage": "Seleccionar Idioma",
+  "spanish": "Español",
+  "english": "Inglés",
+  "dataOrigin": "ORIGEN DE DATOS //",
+  "sagittalRequired": "Plano Sagital Requerido p/ Extracción Analítica.",
+  "liveSensor": "SENSOR EN VIVO",
+  "cameraRt": "Cámara TR + MediaPipe",
+  "diskIngest": "INGESTA DESDE DISCO",
+  "localClip": "Clip local (.mp4)"
 }
