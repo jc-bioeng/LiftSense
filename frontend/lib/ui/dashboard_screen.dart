@@ -9,6 +9,7 @@ import '../l10n/app_localizations.dart';
 import '../localization/locale_provider.dart';
 import 'settings_screen.dart';
 import 'analysis_screen.dart';
+import '../main.dart'; // Para acceder al routeObserver global
 
 class SquatRecord {
   final String date;
@@ -307,7 +308,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ],
                 ),
                 const SizedBox(height: 12),
-                _buildRecentSessions(),
+                ListView.builder(
+                  padding: EdgeInsets.zero, // CRÍTICO: Elimina el espacio fantasma de los ListViews en Flutter
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _mockHistory.length,
+                  itemBuilder: (context, index) {
+                    final record = _mockHistory[index];
+                    return GestureDetector(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => AnalysisScreen(videoPath: record.previewVideoPath),
+                          ),
+                        );
+                      },
+                      child: _buildHistoryCard(context, index, record),
+                    );
+                  },
+                ),
                 const SizedBox(height: 24),
               ],
             ),
@@ -318,15 +338,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   );
 }
 
-  Widget _buildRecentSessions() {
-    return Column(
-      children: _mockHistory.asMap().entries.map((entry) {
-        return HistoryCardWidget(
-          record: entry.value,
-          index: entry.key,
-          totalLength: _mockHistory.length,
-        );
-      }).toList(),
+  Widget _buildHistoryCard(BuildContext context, int index, SquatRecord record) {
+    return HistoryCardWidget(
+      index: index,
+      record: record,
+      totalLength: _mockHistory.length,
     );
   }
 
@@ -469,21 +485,47 @@ class HistoryCardWidget extends StatefulWidget {
   State<HistoryCardWidget> createState() => _HistoryCardWidgetState();
 }
 
-class _HistoryCardWidgetState extends State<HistoryCardWidget> {
+class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
   VideoPlayerController? _videoController;
   bool _videoReady = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Suscribirse al observador de rutas
+    routeObserver.subscribe(this, ModalRoute.of(context)!);
+  }
 
   @override
   void initState() {
     super.initState();
     // Inicialización escalonada: cada tarjeta espera index * 600ms
-    // Evita la contención simultánea del MediaCodec en dispositivos de gama media
     Future.delayed(Duration(milliseconds: widget.index * 600), () {
       if (mounted) _initVideo();
     });
   }
 
+  // Se llama cuando navegamos HACIA OTRA pantalla (ej. al Análisis)
+  @override
+  void didPushNext() {
+    // Liberar el MediaCodec inmediatamente al salir
+    _videoController?.dispose();
+    _videoController = null;
+    if (mounted) setState(() => _videoReady = false);
+  }
+
+  // Se llama cuando VOLVEMOS a esta pantalla desde el Análisis
+  @override
+  void didPopNext() {
+    // Restaurar el video con el efecto staggered
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) _initVideo();
+    });
+  }
+
   Future<void> _initVideo() async {
+    if (_videoController != null) return; // Ya inicializado
+
     final docsDir = await getApplicationDocumentsDirectory();
     final file = File('${docsDir.path}/${widget.record.previewVideoPath}');
     if (!file.existsSync()) return;
@@ -492,205 +534,183 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> {
       file,
       videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
     );
-    await controller.initialize();
-    if (!mounted) {
-      controller.dispose();
-      return;
+    
+    try {
+      await controller.initialize();
+      if (!mounted) {
+        controller.dispose();
+        return;
+      }
+      controller.setVolume(0);
+      controller.setLooping(true);
+      controller.play();
+      setState(() {
+        _videoController = controller;
+        _videoReady = true;
+      });
+    } catch (e) {
+      debugPrint('Error init video Dashboard: $e');
     }
-    controller.setVolume(0);
-    controller.setLooping(true);
-    controller.play();
-    setState(() {
-      _videoController = controller;
-      _videoReady = true;
-    });
   }
 
   @override
   void dispose() {
+    routeObserver.unsubscribe(this);
     _videoController?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: () async {
-        // SOLUCIÓN RADICAL: Eliminamos el controlador por completo antes de navegar.
-        // Algunos dispositivos tienen un límite estricto de MediaCodecs (ej. 4-8)
-        // y pausar no siempre libera el hardware inmediatamente.
-        if (_videoController != null) {
-          final oldController = _videoController;
-          setState(() {
-            _videoController = null;
-            _videoReady = false;
-          });
-          await oldController!.dispose();
-        }
-        
-        if (!mounted) return;
-
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => AnalysisScreen(videoPath: widget.record.previewVideoPath),
-          ),
-        );
-        
-        // Al volver, reiniciamos el video de la tarjeta
-        if (mounted) {
-          _initVideo();
-        }
-      },
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        clipBehavior: Clip.hardEdge,
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: const Color(0xFF222222),
-            width: 1,
-          ),
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      clipBehavior: Clip.hardEdge,
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFF222222),
+          width: 1,
         ),
-        child: Stack(
-          children: [
-            // Video de fondo con opacidad baja
-            if (_videoReady && _videoController != null)
-              Positioned.fill(
-                child: Opacity(
-                  opacity: 0.15,
-                  child: FittedBox(
-                    fit: BoxFit.cover,
-                    child: SizedBox(
-                      width: _videoController!.value.size.width,
-                      height: _videoController!.value.size.height,
-                      child: VideoPlayer(_videoController!),
-                    ),
+      ),
+      child: Stack(
+        children: [
+          // Video de fondo con opacidad baja
+          // Se inicializa escalonadamente para no saturar el MediaCodec
+          if (_videoReady && _videoController != null)
+            Positioned.fill(
+              child: Opacity(
+                opacity: 0.15,
+                child: FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(
+                    width: _videoController!.value.size.width,
+                    height: _videoController!.value.size.height,
+                    child: VideoPlayer(_videoController!),
                   ),
                 ),
-              )
-            else
-              Positioned.fill(
-                child: Opacity(
-                  opacity: 0.10,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
-                        colors: [
-                          Theme.of(context).colorScheme.primary,
-                          Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
-                        ],
-                      ),
+              ),
+            )
+          else
+            // Gradiente de placeholder mientras carga el video
+            Positioned.fill(
+              child: Opacity(
+                opacity: 0.10,
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        Theme.of(context).colorScheme.primary,
+                        Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
+                      ],
                     ),
                   ),
                 ),
               ),
+            ),
 
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                      child: Container(
-                        width: 48,
-                        height: 48,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.white.withValues(alpha: 0.2), width: 0.5),
-                        ),
-                        child: Center(
-                          child: Text(
-                            '0${widget.totalLength - widget.index}',
-                            style: GoogleFonts.inter(
-                              color: Colors.white.withValues(alpha: 0.9),
-                              fontWeight: FontWeight.bold,
-                              fontSize: 16,
-                            ),
-                          ),
-                        ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                    child: Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.1), // Tinte esmerilado
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.white.withValues(alpha: 0.2), width: 0.5),
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Text(
-                              'BACK SQUAT',
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: -0.5,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(6),
-                                color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary.withValues(alpha: 0.2) : Theme.of(context).colorScheme.primary.withValues(alpha: 0.2),
-                                border: Border.all(color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary : Theme.of(context).colorScheme.primary),
-                              ),
-                              child: Text(
-                                widget.record.tag,
-                                style: GoogleFonts.inter(fontSize: 9, color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary : Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold),
-                              ),
-                            )
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          widget.record.date,
+                      child: Center(
+                        child: Text(
+                          '0${widget.totalLength - widget.index}',
                           style: GoogleFonts.inter(
-                            fontSize: 11,
-                            color: Colors.white54,
-                            fontWeight: FontWeight.w500,
+                            color: Colors.white.withValues(alpha: 0.9),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
                           ),
                         ),
-                      ],
+                      ),
                     ),
                   ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        widget.record.maxTrunkAngle,
-                        style: GoogleFonts.inter(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -1.0,
-                          color: Colors.white,
-                        ),
+                      Row(
+                        children: [
+                          Text(
+                            'BACK SQUAT',
+                            style: GoogleFonts.inter(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: -0.5,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(6),
+                              color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary.withValues(alpha: 0.2) : Theme.of(context).colorScheme.primary.withValues(alpha: 0.2),
+                              border: Border.all(color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary : Theme.of(context).colorScheme.primary),
+                            ),
+                            child: Text(
+                              widget.record.tag,
+                              style: GoogleFonts.inter(fontSize: 9, color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary : Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold),
+                            ),
+                          )
+                        ],
                       ),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 4),
                       Text(
-                        'INCLINACIÓN',
+                        widget.record.date,
                         style: GoogleFonts.inter(
-                          fontSize: 9,
-                          letterSpacing: 0.5,
-                          fontWeight: FontWeight.w600,
-                          color: Theme.of(context).colorScheme.primary,
+                          fontSize: 11,
+                          color: Colors.white54,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
                     ],
                   ),
-                ],
-              ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      widget.record.maxTrunkAngle,
+                      style: GoogleFonts.inter(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -1.0,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'INCLINACIÓN',
+                      style: GoogleFonts.inter(
+                        fontSize: 9,
+                        letterSpacing: 0.5,
+                        fontWeight: FontWeight.w600,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                  ],
+                )
+              ],
             ),
-          ],
-        ),
+          )
+        ],
       ),
     );
   }

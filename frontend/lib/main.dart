@@ -7,8 +7,9 @@ import 'ui/dashboard_screen.dart';
 import 'localization/locale_provider.dart';
 import 'utils/video_seeder.dart';
 
-// Definición global del provider para simplicidad en este nivel del proyecto
+// Definición global del provider y el observer para simplicidad en este nivel del proyecto
 final LocaleProvider localeProvider = LocaleProvider();
+final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<void>>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -32,6 +33,7 @@ class LiftSenseApp extends StatelessWidget {
           title: 'LiftSense',
           debugShowCheckedModeBanner: false,
           locale: localeProvider.locale,
+          navigatorObservers: [routeObserver],
           localizationsDelegates: const [
             AppLocalizations.delegate,
             GlobalMaterialLocalizations.delegate,
