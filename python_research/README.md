@@ -1,34 +1,54 @@
-# LiftSense - Investigación de Pose Tracking
+# 🏋️ LiftSense - Motor de Investigación Biomecánica
 
-Este directorio contiene el código y la experimentación inicial para la extracción biomecánica de coordenadas (Tracking) de sentadillas utilizando técnicas de Pose Estimation.
+Este directorio es el núcleo científico de LiftSense. Implementa un pipeline de visión artificial optimizado para el análisis clínico de la sentadilla, utilizando una combinación de Deep Learning (MediaPipe) y Visión Computacional clásica (OpenCV).
 
-## 📁 Archivos principales
-* `pose_tracker.py`: Script principal de tracking biomecánico.
-* `run_tracker.bat`: Ejecutable para procesar los videos de forma automatizada usando el entorno virtual.
-* `requirements.txt`: Dependencias del entorno de Python.
+## 📂 Estructura del Proyecto
+
+```text
+python_research/
+├── core/                        # Núcleo del Motor Biomecánico
+│   ├── tracker.py               # Wrapper de MediaPipe Pose (33 landmarks)
+│   ├── filters.py               # Implementación de One-Euro y Deadzones
+│   ├── camera_calibration.py    # Perfil antropométrico, Escala y Rectificación
+│   ├── biomechanics.py          # Lógica de ángulos, CoM e inferencia de barra
+│   ├── plate_detector.py        # CV clásica para discos (Hough Circles + Textura)
+│   └── barbell_detector.py      # CV clásica para vara (Hough Lines + Tracking)
+├── pose_tracker.py              # Orquestador Principal (Interfaz CLI)
+├── user_profile.json            # Firma biométrica guardada (Privado)
+├── ENGINE_ARCHITECTURE.md       # Documentación técnica avanzada (UML/Flujos)
+└── README.md                    # Esta guía
+```
+
+## 🛡️ Estrategia de Estabilización (The Protection Onion)
+
+La estabilidad del esqueleto en LiftSense no es producto del azar, sino de un pipeline de suavizado en capas:
+
+### 1. Filtro One-Euro (Adaptativo)
+*   **Referencia**: [Casiez, G. et al. (2012). "1€ Filter: A Simple Algorithm for Filtering Noisy Signals in Real Time"](https://hal.inria.fr/hal-00670496/document).
+*   **Lógica**: Utiliza una frecuencia de corte dinámica $f_c$ que varía según la velocidad del landmark.
+    - **En reposo ($v \approx 0$)**: La frecuencia de corte mínima ($f_{c\_min} = 0.01$ para pies) elimina el temblor electrónico de la cámara.
+    - **En movimiento**: El parámetro $\beta$ permite que el filtro se "abra", eliminando el retraso (lag) y siguiendo el movimiento humano explosivo.
+
+### 2. Foot Locking (Deadzone Espacial)
+*   **Lógica**: Filtro de histéresis de 1.5px. Si el desplazamiento euclídeo del tobillo es menor al umbral, el punto se bloquea.
+*   **Objetivo**: "Clavar" el centro del pie al suelo, evitando el efecto de patinaje sobre hielo común en visiones artificiales.
+
+### 3. Sincronización Local (Local-Frame Sync)
+*   **Lógica**: En los primeros frames del video, el sistema "mapea" las proporciones visuales que MediaPipe otorga a los huesos del usuario.
+*   **Objetivo**: Corregir desfases de 1-2cm debidos a la perspectiva, alineando el esqueleto perfectamente con el centro visual de la articulación.
+
+### 4. Rectificación Cinemática (Cascada Inversa)
+*   **Lógica**: Proyección trigonométrica que mantiene la magnitud de los vectores óseos constante basada en la firma biométrica.
+*   **Innovación**: En lateral, rectificamos de **Tobillo hacia Rodilla**. El pie es el ancla, y el fémur absorbe la discrepancia, protegiendo la base de la sentadilla.
 
 ---
 
-## 🛠️ Decisiones Técnicas Tomadas
+## 🛠️ Stack Tecnológico
 
-### 1. Cambio de Arquitectura: de MediaPipe a YOLOv8
-**Contexto inicial:** Se implementó `MediaPipe Pose` ya que es de la vieja escuela y ofrece buena segmentación 2D. 
-**Problema:** MediaPipe demostró un desempeño pobre y caídas completas de predicción durante las sentadillas laterales completas (donde se ocluía parte del cuerpo por completo) y en vistas posteriores puras debido a la ausencia de reconocimiento facial. 
-**Solución:** Se migró a **Ultralytics YOLOv8-Pose**. YOLOv8 no depende de un rostro humano como ancla geométrica, solucionando el problema lateral y entregando predicción robusta en escenarios severamente ocluidos y espaldas puras.
+*   **Motor de Pose**: Google MediaPipe Pose (Modelo BlazePose GHUM).
+*   **Motor de Visión**: OpenCV 4.x.
+*   **Matemáticas**: NumPy (Álgebra vectorial) y Pandas (Exportación).
+*   **Licencia**: MIT.
 
-### 2. Filtrado de Falsos Positivos
-**Contexto:** Los modelos basados en YOLO y MediaPipe, al configurarse con confianza baja, detectan frecuentemente geometría de fondo como si fuesen partes del cuerpo para intentar "calzar" el esqueleto en el plano (Falsos Positivos).
-**Solución:** Se implementó un algoritmo estricto de visibilidad (`VISIBILITY_THRESHOLD = 0.60`) que requiere que los puntos clave absolutos (hombros, cadera y rodillas) de una persona estén visibles; de lo contrario, el frame entero se rechaza. 
-**Mejora de Estabilidad (Warm-up):** Para evitar fallos iniciales en fotogramas borrosos, el algoritmo espera detectar consistentemente la pose validada por al menos 5 frames seguidos antes de empezar a grabar un esqueleto en los videos de salida.
-
-### 3. Exclusión Visual de Brazos Ocluidos
-**Problema:** Al hacer Backsquat con vista lateral, el brazo opuesto pierde por completo visibilidad, causando que las librerías fuercen a la línea virtual a dibujar hacia la esquina superior del video (Coordenada 0,0 en casos de pérdida grave).
-**Solución:** Se desactivó la función nativa `.plot()` de YOLOv8 que interconecta todo ciegamente. Se programó a medida un método `draw_custom_skeleton_with_spine` para aplicar filtros individualizados a cada conexión ósea en COCO. Si las extremidades poseen un `DRAW_THRESHOLD` < 0.50, los huesos virtualmente se ocultan para lograr un procesamiento visual ultra-limpio. Las caderas, piernas y espalda nunca sufren disrupción gráfica.
-
-### 4. Segmentación Biomecánica: "Columna Virtual"
-**Problema:** Ninguno de los modelos populares de Machine Learning (COCO, MediaPipe, MPII) tienen puntos vertebrales exactos para segmentar la columna en sentadillas.
-**Solución e Implementación:** 
-- Se derivaron dos puntos virtuales vitales mediante cálculo geométrico. 
-- *Punto Cervical (C7):* Punto de apoyo típico de la barra de High Bar. (Punto medio entre Hombro Derecho e Izquierdo).
-- *Punto del Sacro:* Estimación del límite inferior lumbar (Punto medio entre Cadera Derecha e Izquierda).
-- Estas coordenadas (`spine_neck` y `spine_pelvis`) ahora se dibujan explícitamente en color cian y se exportan nativamente al archivo CSV, listas para ser convertidas a metros y generar **Reacciones de Fuerzas / Momentum Crítico Lumbopélvico**.
+---
+**LiftSense Research Group** - *Poniendo ciencia en cada repetición.*
