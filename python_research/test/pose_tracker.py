@@ -16,7 +16,6 @@ from core.filters import PoseFilterSession
 from core.camera_calibration import CameraCalibrator, BodyProfile
 from core.biomechanics import BiomechanicsEngine, ViewType
 from core.plate_detector import PlateDetector
-from core.barbell_detector import BarbellDetector
 
 # ─── Definición de colores ────────────────────────────────────────────────────
 CLR_KP       = (0, 220, 80)      # keypoints  → verde
@@ -42,45 +41,16 @@ SKELETON_CONNECTIONS = [
 
 # ─── Dibujado ────────────────────────────────────────────────────────────────
 
-def _visible(kps: dict, name: str, threshold: float = 0.5) -> bool:
-    p = kps.get(name)
-    return p is not None and p['conf'] > threshold
-
-
-def draw_skeleton(frame, kps: dict, current_view: str = 'unknown'):
-    is_lat = current_view == 'lateral'
-    draw_conf = 0.65 if is_lat else 0.45
-    
-    # En lateral, evitamos el "pie fantasma".
-    # Solo dibujamos la pierna si la cadena (Hip-Knee-Ankle) es sólida.
-    leg_visible = {'l': True, 'r': True}
-    if is_lat:
-        for side in ['l', 'r']:
-            chain = [f'{side}_hip', f'{side}_knee', f'{side}_ankle']
-            if not all(kps.get(p, {}).get('conf', 0) > draw_conf for p in chain):
-                leg_visible[side] = False
-
+def draw_skeleton(frame, kps: dict, conf: float = 0.50):
     for p1, p2 in SKELETON_CONNECTIONS:
         if p1 in kps and p2 in kps:
-            # Filtro de segmento: si pertenece a una pierna "invisible", saltar
-            side_p1 = p1[0] if p1[1] == '_' else None
-            if is_lat and side_p1 in leg_visible and not leg_visible[side_p1]:
-                # Solo bloqueamos segmentos de pierna (hip, knee, ankle, heel, foot_index)
-                if any(x in p1 or x in p2 for x in ['knee', 'ankle', 'heel', 'foot_index']):
-                    continue
-
-            if kps[p1]['conf'] > draw_conf and kps[p2]['conf'] > draw_conf:
+            if kps[p1]['conf'] > conf and kps[p2]['conf'] > conf:
                 cv2.line(frame,
                          (int(kps[p1]['x']), int(kps[p1]['y'])),
                          (int(kps[p2]['x']), int(kps[p2]['y'])),
                          CLR_BONE, 2)
     for name, kp in kps.items():
-        side = name[0] if name[1] == '_' else None
-        if is_lat and side in leg_visible and not leg_visible[side]:
-             if any(x in name for x in ['knee', 'ankle', 'heel', 'foot_index']):
-                 continue
-                 
-        if kp['conf'] > draw_conf:
+        if kp['conf'] > conf:
             cv2.circle(frame, (int(kp['x']), int(kp['y'])), 5, CLR_KP, -1)
 
 
@@ -218,29 +188,22 @@ def run_calibrate(input_path: str, profile_path: str, height_cm: float):
 # ─── Modo: analyze ───────────────────────────────────────────────────────────
 
 def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
-                height_cm: float, profile_path: str | None, forced_view: str | None = None):
+                height_cm: float, profile_path: str | None):
     print("\n=== MODO ANÁLISIS ===")
     tracker = MediaPipePoseTracker()
     filter_session = PoseFilterSession()
     calibrator = CameraCalibrator(height_cm)
     biomech = BiomechanicsEngine()
     plate_detector = PlateDetector()
-    barbell_detector = BarbellDetector()
     profile = BodyProfile()
 
     if profile_path and profile.load(profile_path):
+        # La firma ya tiene cm_per_pixel guardado, sincronizar con el calibrador
         calibrator.cm_per_pixel = profile.cm_per_pixel
         calibrator.calibrated = True
         print(f"[Perfil] Cargado desde {profile_path}")
     else:
-        print("[Perfil] Sin perfil cargado. La validacion anatomica estara inactiva.")
-
-    # Forzar vista si se especifica via argumento
-    if forced_view:
-        view_map = {'frontal': ViewType.FRONTAL, 'posterior': ViewType.POSTERIOR, 'lateral': ViewType.LATERAL}
-        if forced_view in view_map:
-            biomech.set_view_lock(view_map[forced_view])
-            print(f"[Vista] Forzada a: {forced_view.upper()}")
+        print("[Perfil] Sin perfil cargado. La validación anatómica estará inactiva.")
 
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -257,16 +220,7 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
 
     # View-lock: acumular votos en los primeros N frames
     view_votes = {v: 0 for v in ViewType}
-    VIEW_LOCK_AFTER = 90  # 3 segundos a 30 FPS para decidir vista dominante
-    VIEW_LOCK_MAJORITY = 0.55  # El 55% de votos debe ir a la misma vista
-
-    # Persistencia temporal (para huecos en el fondo de la sentadilla)
-    last_valid_filtered = None
-    hold_counter = 0
-    MAX_HOLD_FRAMES = 20  # Mantener la pose hasta por 0.6s si se pierde
-
-    # Sincronización local para este video
-    local_synched = False
+    VIEW_LOCK_AFTER = 30  # Frames para decidir la vista dominante
 
     print(f"Procesando: {input_path}  ({width}x{height} @{fps:.1f} FPS)")
 
@@ -284,8 +238,8 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
         if pose_result.keypoints:
             # ── Validar que hay una persona real ────────────────────────────
             raw_kps = pose_result.keypoints
-            # Muy permisivo: con que haya confianza en cualquier punto clave base
-            has_body = any(raw_kps.get(pt, {}).get('conf', 0) > 0.15 for pt in ['l_shoulder', 'r_shoulder', 'l_hip', 'r_hip', 'l_knee', 'r_knee'])
+            base_points = ['l_shoulder', 'r_shoulder', 'l_hip', 'r_hip']
+            has_body = any(raw_kps.get(pt, {}).get('conf', 0) > 0.60 for pt in base_points)
 
             if not has_body:
                 out.write(frame)
@@ -297,51 +251,29 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
             filtered = filter_session.process(timestamp_ms, raw_kps)
 
             # ── Validación Anatómica (Firma Biométrica) ──────────────────────
-            # Umbral ultra-relajado (100% de margen)
-            anatomy_ok = not profile.is_ready or profile.validate_keypoints(filtered, tolerance=1.0)
-            
-            if not anatomy_ok:
-                cv2.putText(frame, "ANATOMY WARNING (Distortion)", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
-            else:
-                last_valid_filtered = filtered
-                hold_counter = 0
+            if profile.is_ready and not profile.validate_keypoints(filtered):
+                # Esqueleto anatómicamente imposible → ignorar frame
+                cv2.putText(frame, "FRAME INVALIDO (anatomy check)", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                out.write(frame)
+                frame_idx += 1
+                data_rows.append(row_data)
+                continue
 
-            # ── Calibración de distancia (Escala fija por video) ─────────────
+            # ── Calibración de distancia si no hay perfil ────────────────────
             if not calibrator.calibrated:
                 calibrator.try_calibrate(filtered)
 
-            # ── Sincronización Local (Ajuste Fino de articulaciones) ────────
-            # Si ya tenemos escala, ajustamos los huesos a lo que se ve en el video
-            if calibrator.calibrated and not local_synched:
-                if profile.init_local_segments(filtered):
-                    local_synched = True
-
             # ── View-Lock ────────────────────────────────────────────────────
-            if biomech._view_lock is None and frame_idx < VIEW_LOCK_AFTER:
+            if frame_idx < VIEW_LOCK_AFTER:
                 current_view = biomech._detect_view(filtered)
                 view_votes[current_view] += 1
-
-                # Intentar bloquear cuando el voto alcanza la mayoría o al final de la ventana
-                total_votes = sum(view_votes.values())
-                dominant = max(view_votes, key=view_votes.get)
-                majority_reached = (view_votes[dominant] / max(total_votes, 1)) > VIEW_LOCK_MAJORITY
-
-                if majority_reached or frame_idx == VIEW_LOCK_AFTER - 1:
-                    if dominant != ViewType.UNKNOWN:
-                        biomech.set_view_lock(dominant)
-            
-            # ── Rectificación Anatómica (Rigor Biomecánico) ─────────────────
-            # Detectar vista primero para saber qué rectificación aplicar
-            current_view = biomech._detect_view(filtered)
-            
-            rectified = filtered
-            if current_view == ViewType.LATERAL:
-                rectified = profile.rectify_lateral(filtered)
+                if frame_idx == VIEW_LOCK_AFTER - 1:
+                    dominant = max(view_votes, key=view_votes.get)
+                    biomech.set_view_lock(dominant)
             
             # ── Biomecánica ──────────────────────────────────────────────────
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            metrics = biomech.calculate_metrics(rectified, gray, calibrator.px_to_cm, barbell_detector)
+            metrics = biomech.calculate_metrics(filtered, calibrator.px_to_cm)
             view_type = ViewType(metrics.get('view_type', 'unknown'))
 
             # ── Guardar CSV ──────────────────────────────────────────────────
@@ -352,43 +284,27 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
             row_data.update(metrics)
 
             # ── Dibujar ──────────────────────────────────────────────────────
-            # Pasamos la vista actual para que sepa si debe ocultar el lado lejano
-            draw_skeleton(frame, rectified, current_view=view_type.value)
+            draw_skeleton(frame, filtered)
             draw_hud(frame, metrics, frame_idx, calibrator.calibrated, "analyze")
-            
-            # Platos: Los discos pueden confirmar la barra incluso si el brazo no se ve claro.
-            plate_observed = False
-            active_plate = None
 
-            if view_type == ViewType.LATERAL:
+            # Platos: solo en vista lateral
+            if metrics.get('has_barbell') and view_type == ViewType.LATERAL:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                # Escalar radio esperado de disco olímpico (~22cm)
                 expected_radius_px = None
                 if calibrator.cm_per_pixel:
-                    expected_radius_px = int(22.5 / calibrator.cm_per_pixel)
+                    expected_radius_px = int(22.0 / calibrator.cm_per_pixel)
 
                 for side, direction in [('l', 'left'), ('r', 'right')]:
-                    sh_kp = filtered.get(f'{side}_shoulder')
-                    if _visible(filtered, f'{side}_shoulder', 0.4):
+                    wrist = filtered.get(f'{side}_wrist')
+                    if wrist and wrist['conf'] > 0.50:
                         plate = plate_detector.detect(
-                            gray, sh_kp['x'], sh_kp['y'], direction,
+                            gray, wrist['x'], wrist['y'], direction,
                             expected_radius_px=expected_radius_px
                         )
                         if plate:
                             px, py, pr = plate
-                            y_diff_cm = abs(py - sh_kp['y']) * (calibrator.cm_per_pixel or 0)
-                            if y_diff_cm < 12:
-                                plate_observed = True
-                                active_plate = (px, py, pr)
-                                break # Basta con detectar un disco sólido
-
-            # Validamos la observación con el buffer de persistencia
-            has_barbell_final = barbell_detector.verify_with_buffer(plate_observed)
-            metrics['has_barbell'] = has_barbell_final
-            row_data['has_barbell'] = has_barbell_final
-
-            # SÓLO dibujamos si la barra es estable según el buffer
-            if has_barbell_final and active_plate:
-                px, py, pr = active_plate
-                cv2.circle(frame, (px, py), pr, CLR_FOOT, 2)
+                            cv2.circle(frame, (px, py), pr, CLR_FOOT, 2)
 
         data_rows.append(row_data)
         out.write(frame)
@@ -415,8 +331,6 @@ if __name__ == "__main__":
                         help="Altura del usuario en CM")
     parser.add_argument("--profile", default=None,
                         help="Ruta al user_profile.json (obligatorio en modo analyze si se tiene)")
-    parser.add_argument("--view", choices=["frontal", "posterior", "lateral"], default=None,
-                        help="Forzar vista especifica (omite la detección automática)")
     args = parser.parse_args()
 
     base = os.path.splitext(os.path.basename(args.input))[0]
@@ -428,4 +342,4 @@ if __name__ == "__main__":
     else:
         out_vid = os.path.join(dir_, f"{base}_lstrack.mp4")
         out_csv = os.path.join(dir_, f"{base}_lstrack.csv")
-        run_analyze(args.input, out_vid, out_csv, args.height, args.profile, forced_view=args.view)
+        run_analyze(args.input, out_vid, out_csv, args.height, args.profile)

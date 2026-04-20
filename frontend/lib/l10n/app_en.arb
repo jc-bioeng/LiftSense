@@ -1,0 +1,21 @@
+{
+  "appTitle": "LIFTSENSE",
+  "initSquatRecord": "INIT SQUAT RECORD",
+  "kinematicExtraction": "Kinematic Extraction // Sagittal Plane",
+  "metaTrends": "META-TRENDS // LAST 7 DAYS",
+  "avgMaxInclination": "AVG MAX INCLINATION",
+  "improvement": "IMPROVEMENT",
+  "operationalHistory": "OPERATIONAL HISTORY",
+  "maxTrunk": "MAX TRUNK",
+  "settings": "Settings",
+  "language": "Language",
+  "selectLanguage": "Select Language",
+  "spanish": "Spanish",
+  "english": "English",
+  "dataOrigin": "DATA SOURCE //",
+  "sagittalRequired": "Sagittal Plane Required for Analytical Extraction.",
+  "liveSensor": "LIVE SENSOR",
+  "cameraRt": "RT Camera + MediaPipe",
+  "diskIngest": "DISK INGEST",
+  "localClip": "Local clip (.mp4)"
+}
