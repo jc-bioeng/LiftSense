@@ -5,6 +5,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:video_player/video_player.dart';
+import 'package:visibility_detector/visibility_detector.dart';
+import 'package:shimmer/shimmer.dart';
 import '../l10n/app_localizations.dart';
 import '../localization/locale_provider.dart';
 import 'settings_screen.dart';
@@ -17,14 +19,15 @@ class SquatRecord {
   final String maxTrunkAngle;
   final String videoPath;
   final String previewVideoPath;
-  const SquatRecord(this.date, this.tag, this.maxTrunkAngle, this.videoPath, this.previewVideoPath);
+  final String csvPath;
+  const SquatRecord(this.date, this.tag, this.maxTrunkAngle, this.videoPath, this.previewVideoPath, this.csvPath);
 }
 
 final List<SquatRecord> _mockHistory = [
-  const SquatRecord('Hoy, 09:41 AM', 'PR', '46°', 'mockup_squat.mp4', 'mockup_squat.mp4'),
-  const SquatRecord('Ayer, 04:20 PM', 'WARM', '40°', 'squat_1.mp4', 'squat_1_out.mp4'),
-  const SquatRecord('Mar 14, 06:15 AM', 'RAW', '43°', 'squat_2.mp4', 'squat_2_out.mp4'),
-  const SquatRecord('Mar 10, 08:30 PM', 'HEAVY', '48°', 'squat_3.mp4', 'squat_3_out.mp4'),
+  const SquatRecord('Hoy, 09:41 AM', 'FRONTAL', '46°', 'hi_frontal.mp4', 'frontal.mp4', 'frontal_lstrack.csv'),
+  const SquatRecord('Ayer, 04:20 PM', 'LATERAL', '40°', 'hi_lateral.mp4', 'lateral.mp4', 'lateral_lstrack.csv'),
+  const SquatRecord('Mar 14, 06:15 AM', 'POSTERIOR', '43°', 'hi_posterior.mp4', 'posterior.mp4', 'posterior_lstrack.csv'),
+  const SquatRecord('Mar 10, 08:30 PM', 'CARAC', '48°', 'hi_carac.mp4', 'carac.mp4', 'frontal_lstrack.csv'),
 ];
 
 class DashboardScreen extends StatefulWidget {
@@ -320,7 +323,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (context) => AnalysisScreen(videoPath: record.previewVideoPath),
+                            builder: (context) => AnalysisScreen(
+                              videoPath: record.videoPath,
+                              csvPath: record.csvPath,
+                              exerciseName: 'BACK SQUAT',
+                              viewTag: record.tag,
+                              captureDate: record.date,
+                            ),
                           ),
                         );
                       },
@@ -463,7 +472,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
       Navigator.pop(context); // cerrar loader
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (context) => const AnalysisScreen()),
+        MaterialPageRoute(
+          builder: (context) => const AnalysisScreen(
+            videoPath: 'frontal.mp4',
+            csvPath: 'frontal_lstrack.csv',
+            exerciseName: 'BACK SQUAT',
+            viewTag: 'FRONTAL',
+            captureDate: 'Hoy, 09:41 AM',
+          ),
+        ),
       );
     });
   }
@@ -492,40 +509,35 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Suscribirse al observador de rutas
     routeObserver.subscribe(this, ModalRoute.of(context)!);
   }
 
   @override
   void initState() {
     super.initState();
-    // Inicialización escalonada: cada tarjeta espera index * 600ms
-    Future.delayed(Duration(milliseconds: widget.index * 600), () {
+    // Staggered initialization: wait (index + 1) * 500ms to avoid overloading
+    Future.delayed(Duration(milliseconds: (widget.index + 1) * 500), () {
       if (mounted) _initVideo();
     });
   }
 
-  // Se llama cuando navegamos HACIA OTRA pantalla (ej. al Análisis)
   @override
   void didPushNext() {
-    // Liberar el MediaCodec inmediatamente al salir
+    _videoController?.pause();
     _videoController?.dispose();
     _videoController = null;
     if (mounted) setState(() => _videoReady = false);
   }
 
-  // Se llama cuando VOLVEMOS a esta pantalla desde el Análisis
   @override
   void didPopNext() {
-    // Restaurar el video con el efecto staggered
     Future.delayed(const Duration(milliseconds: 300), () {
       if (mounted) _initVideo();
     });
   }
 
   Future<void> _initVideo() async {
-    if (_videoController != null) return; // Ya inicializado
-
+    if (_videoController != null) return;
     final docsDir = await getApplicationDocumentsDirectory();
     final file = File('${docsDir.path}/${widget.record.previewVideoPath}');
     if (!file.existsSync()) return;
@@ -534,7 +546,6 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
       file,
       videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
     );
-    
     try {
       await controller.initialize();
       if (!mounted) {
@@ -550,6 +561,7 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
       });
     } catch (e) {
       debugPrint('Error init video Dashboard: $e');
+      controller.dispose();
     }
   }
 
@@ -562,7 +574,19 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return VisibilityDetector(
+      key: Key('history_card_${widget.index}'),
+      onVisibilityChanged: (info) {
+        if (!mounted || _videoController == null) return;
+        if (info.visibleFraction == 0) {
+          _videoController?.pause();
+        } else {
+          // Solo darle play si la ruta actual es el dashboard
+          // (evita que se reproduzcan de fondo cuando estamos en Análisis)
+          _videoController?.play();
+        }
+      },
+      child: Container(
       margin: const EdgeInsets.only(bottom: 12),
       clipBehavior: Clip.hardEdge,
       decoration: BoxDecoration(
@@ -576,7 +600,6 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
       child: Stack(
         children: [
           // Video de fondo con opacidad baja
-          // Se inicializa escalonadamente para no saturar el MediaCodec
           if (_videoReady && _videoController != null)
             Positioned.fill(
               child: Opacity(
@@ -592,20 +615,16 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
               ),
             )
           else
-            // Gradiente de placeholder mientras carga el video
+            // Shimmer effect while video is loading
             Positioned.fill(
-              child: Opacity(
-                opacity: 0.10,
+              child: Shimmer.fromColors(
+                baseColor: const Color(0xFF1A1A1A),
+                highlightColor: const Color(0xFF2A2A2A),
+                period: const Duration(milliseconds: 1500),
                 child: Container(
                   decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.centerLeft,
-                      end: Alignment.centerRight,
-                      colors: [
-                        Theme.of(context).colorScheme.primary,
-                        Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
-                      ],
-                    ),
+                    color: Colors.black,
+                    borderRadius: BorderRadius.circular(16),
                   ),
                 ),
               ),
@@ -623,9 +642,12 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
                       width: 48,
                       height: 48,
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.1), // Tinte esmerilado
+                        color: Colors.white.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.2), width: 0.5),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.2),
+                          width: 0.5,
+                        ),
                       ),
                       child: Center(
                         child: Text(
@@ -661,14 +683,26 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
                               borderRadius: BorderRadius.circular(6),
-                              color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary.withValues(alpha: 0.2) : Theme.of(context).colorScheme.primary.withValues(alpha: 0.2),
-                              border: Border.all(color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary : Theme.of(context).colorScheme.primary),
+                              color: widget.record.tag == 'PR'
+                                  ? Theme.of(context).colorScheme.tertiary.withValues(alpha: 0.2)
+                                  : Theme.of(context).colorScheme.primary.withValues(alpha: 0.2),
+                              border: Border.all(
+                                color: widget.record.tag == 'PR'
+                                    ? Theme.of(context).colorScheme.tertiary
+                                    : Theme.of(context).colorScheme.primary,
+                              ),
                             ),
                             child: Text(
                               widget.record.tag,
-                              style: GoogleFonts.inter(fontSize: 9, color: widget.record.tag == 'PR' ? Theme.of(context).colorScheme.tertiary : Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold),
+                              style: GoogleFonts.inter(
+                                fontSize: 9,
+                                color: widget.record.tag == 'PR'
+                                    ? Theme.of(context).colorScheme.tertiary
+                                    : Theme.of(context).colorScheme.primary,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
-                          )
+                          ),
                         ],
                       ),
                       const SizedBox(height: 4),
@@ -712,6 +746,7 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
           )
         ],
       ),
-    );
-  }
+    ),
+  );
+}
 }

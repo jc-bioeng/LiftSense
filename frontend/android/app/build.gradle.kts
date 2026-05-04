@@ -28,6 +28,24 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // ── Native C++ Build (LiftSense Core) ──────────────
+        externalNativeBuild {
+            cmake {
+                cppFlags("-std=c++17", "-O2")
+                arguments("-DANDROID_STL=c++_shared")
+            }
+        }
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+    }
+
+    // ── CMake path to the native library ────────────────────
+    externalNativeBuild {
+        cmake {
+            path = file("../../native/CMakeLists.txt")
+        }
     }
 
     buildTypes {
@@ -42,3 +60,4 @@ android {
 flutter {
     source = "../.."
 }
+
