@@ -127,33 +127,53 @@ class BodyProfile:
 
     def rectify_lateral(self, kps: dict) -> dict:
         """
-        Usa las longitudes 'locales' (bloqueadas al inicio del video)
-        para mantener la estabilidad sin desplazar los puntos de su centro visual.
+        Anclajes Independientes con Restricción Blanda (Soft Constraint):
+        Mantiene la rigidez en las piernas pero permite un encogimiento natural 
+        del torso por perspectiva, asegurando que los hombros no "vuelen".
         """
         if not self.is_ready:
             return kps
         
         new_kps = {k: v.copy() for k, v in kps.items()}
-        l_sh, r_sh = new_kps.get('l_shoulder'), new_kps.get('r_shoulder')
-        master_sh = None
-        if l_sh and r_sh: master_sh = l_sh if l_sh['conf'] >= r_sh['conf'] else r_sh
-        elif l_sh: master_sh = l_sh
-        elif r_sh: master_sh = r_sh
-        
-        if not master_sh: return kps
 
+        # 1. Rectificación Independiente por Lado
         for side in ['l', 'r']:
-            # 1. Torso
-            hi = new_kps.get(f'{side}_hip')
-            if hi and 'torso' in self.segments_px:
-                hi['x'], hi['y'] = self._project_segment(master_sh, hi, self.segments_px['torso'])
-            
-            # 2. Tibia (Anclada al Tobillo)
-            kn = new_kps.get(f'{side}_knee')
             an = new_kps.get(f'{side}_ankle')
+            kn = new_kps.get(f'{side}_knee')
+            hi = new_kps.get(f'{side}_hip')
+            sh = new_kps.get(f'{side}_shoulder')
+
+            # Piernas: Rígidas (Tibia y Fémur) para medir profundidad con precisión.
             seg_tibia = f'tibia_{side}'
             if an and kn and seg_tibia in self.segments_px:
                 kn['x'], kn['y'] = self._project_segment(an, kn, self.segments_px[seg_tibia])
+
+            seg_femur = f'femur_{side}'
+            if kn and hi and seg_femur in self.segments_px:
+                hi['x'], hi['y'] = self._project_segment(kn, hi, self.segments_px[seg_femur])
+
+            # Torso: Restricción Blanda (Soft Constraint)
+            # Permitimos encogimiento por perspectiva, pero no más del 15% del tamaño real.
+            if hi and sh and 'torso' in self.segments_px:
+                target_len = self.segments_px['torso']
+                dx = sh['x'] - hi['x']
+                dy = sh['y'] - hi['y']
+                curr_len = math.sqrt(dx*dx + dy*dy)
+                
+                min_len = target_len * 0.85 # Margen de libertad
+                if curr_len < min_len and curr_len > 1e-5:
+                    scale = min_len / curr_len
+                    sh['x'] = hi['x'] + dx * scale
+                    sh['y'] = hi['y'] + dy * scale
+
+        # 2. Simetría de Coordenadas (Master-Slave Sync) - Incondicional en Lateral
+        # Forzamos el solapamiento perfecto para eliminar "fantasmas" y triángulos extraños.
+        for part in ['shoulder', 'hip']:
+            l_pt, r_pt = new_kps.get(f'l_{part}'), new_kps.get(f'r_{part}')
+            if l_pt and r_pt:
+                # El maestro es el que tiene mejor visión; el esclavo lo sigue ciegamente.
+                master, slave = (l_pt, r_pt) if l_pt['conf'] >= r_pt['conf'] else (r_pt, l_pt)
+                slave['x'], slave['y'] = master['x'], master['y']
 
         return new_kps
 

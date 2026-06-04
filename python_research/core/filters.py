@@ -61,7 +61,7 @@ class PoseFilterSession:
     """
     FEET_LANDMARKS = ['l_heel', 'r_heel', 'l_foot_index', 'r_foot_index', 'l_ankle', 'r_ankle']
 
-    def __init__(self, min_cutoff=1.0, beta=0.005, d_cutoff=1.0):
+    def __init__(self, min_cutoff=0.05, beta=0.05, d_cutoff=1.0):
         self.filters = {} 
         self.min_cutoff = min_cutoff
         self.beta = beta
@@ -74,11 +74,38 @@ class PoseFilterSession:
         
         for name, kp in keypoints.items():
             conf = kp['conf']
-            is_foot = name in self.FEET_LANDMARKS
             
-            # Ajuste dinámico: los pies necesitan estabilidad absoluta (min_cutoff casi cero)
-            current_min_cutoff = 0.01 if is_foot else self.min_cutoff
-            current_beta = 0.001 if is_foot else self.beta
+            # Identificación de 4 Zonas de Inercia:
+            is_foot = name in self.FEET_LANDMARKS
+            is_face = any(x in name for x in ['nose', 'eye', 'ear'])
+            is_action = any(x in name for x in ['shoulder', 'elbow', 'wrist'])
+
+            # --- INTERPOLACIÓN POR CONFIANZA (Cara/Nariz) ---
+            # Si el barbell ocluye el rostro (conf < 0.65), mantenemos la última posición
+            # buena conocida para evitar que el punto "salte" a la barra.
+            if is_face and conf < 0.65 and name in self.last_raw:
+                for axis in ['x', 'y']:
+                    kp[axis] = self.last_raw[name][axis]
+                # Reducimos drásticamente la inercia del filtro en este frame
+                # para que no intente seguir el cambio.
+            
+            # Calibración Biomecánica por Zona:
+            if is_foot:
+                # Zona 1: Pies (Inmovilidad en suelo)
+                current_min_cutoff = 0.005
+                current_beta = 0.001
+            elif is_face:
+                # Zona 2: Rostro (Estabilidad facial, seguir sin lag)
+                current_min_cutoff = 0.5
+                current_beta = 0.005
+            elif is_action:
+                # Zona 3: Acción (Brazos/Hombros, máxima velocidad para shrugs)
+                current_min_cutoff = 1.5
+                current_beta = 0.1
+            else:
+                # Zona 4: Core/Piernas (Trayectorias fluidas)
+                current_min_cutoff = 0.8
+                current_beta = 0.05
 
             filtered_kp = {'conf': conf}
             for axis in ['x', 'y']:

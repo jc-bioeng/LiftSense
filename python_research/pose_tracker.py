@@ -1,8 +1,9 @@
 """
-pose_tracker.py — Orquestador Principal LiftSense
+pose_tracker.py — Orquestador Principal LiftSense v2.0
 Modos:
-  calibrate → extrae antropometría frontal y guarda user_profile.json
-  analyze   → carga el perfil, valida anatómicamente y analiza la sentadilla
+  calibrate        → extrae antropometría frontal y guarda user_profile.json
+  analyze          → carga el perfil, valida anatómicamente y analiza la sentadilla
+  export_training  → analiza + genera JSONL estructurado para ML
 """
 
 import cv2
@@ -17,6 +18,9 @@ from core.camera_calibration import CameraCalibrator, BodyProfile
 from core.biomechanics import BiomechanicsEngine, ViewType
 from core.plate_detector import PlateDetector
 from core.barbell_detector import BarbellDetector
+from core.ground_detector import GroundDetector
+from core.inclination_analyzer import InclinationAnalyzer
+from core.data_exporter import TrainingDataExporter
 
 # ─── Definición de colores ────────────────────────────────────────────────────
 CLR_KP       = (0, 220, 80)      # keypoints  → verde
@@ -25,9 +29,10 @@ CLR_COM      = (0, 230, 230)     # CoM        → cian
 CLR_BAR      = (255, 80, 0)      # barra C7   → naranja
 CLR_PLUMB    = (80, 80, 255)     # plumb line → azul
 CLR_FOOT     = (255, 0, 200)     # platos / pie→ magenta
+CLR_GROUND   = (0, 180, 60)      # suelo      → verde oscuro
+CLR_ANGLE    = (255, 200, 0)     # ángulos    → amarillo
 
 SKELETON_CONNECTIONS = [
-    ('nose', 'l_shoulder'), ('nose', 'r_shoulder'),
     ('l_shoulder', 'r_shoulder'),
     ('l_shoulder', 'l_elbow'), ('l_elbow', 'l_wrist'),
     ('r_shoulder', 'r_elbow'), ('r_elbow', 'r_wrist'),
@@ -49,7 +54,8 @@ def _visible(kps: dict, name: str, threshold: float = 0.5) -> bool:
 
 def draw_skeleton(frame, kps: dict, current_view: str = 'unknown'):
     is_lat = current_view == 'lateral'
-    draw_conf = 0.65 if is_lat else 0.45
+    draw_conf = 0.45  # Relajado para permitir ver hombros y nariz parcialmente ocluidos
+    leg_strict_conf = 0.65 if is_lat else 0.45
     
     # En lateral, evitamos el "pie fantasma".
     # Solo dibujamos la pierna si la cadena (Hip-Knee-Ankle) es sólida.
@@ -57,7 +63,7 @@ def draw_skeleton(frame, kps: dict, current_view: str = 'unknown'):
     if is_lat:
         for side in ['l', 'r']:
             chain = [f'{side}_hip', f'{side}_knee', f'{side}_ankle']
-            if not all(kps.get(p, {}).get('conf', 0) > draw_conf for p in chain):
+            if not all(kps.get(p, {}).get('conf', 0) > leg_strict_conf for p in chain):
                 leg_visible[side] = False
 
     for p1, p2 in SKELETON_CONNECTIONS:
@@ -75,6 +81,7 @@ def draw_skeleton(frame, kps: dict, current_view: str = 'unknown'):
                          (int(kps[p2]['x']), int(kps[p2]['y'])),
                          CLR_BONE, 2)
     for name, kp in kps.items():
+        if name == 'nose': continue
         side = name[0] if name[1] == '_' else None
         if is_lat and side in leg_visible and not leg_visible[side]:
              if any(x in name for x in ['knee', 'ankle', 'heel', 'foot_index']):
@@ -84,26 +91,154 @@ def draw_skeleton(frame, kps: dict, current_view: str = 'unknown'):
             cv2.circle(frame, (int(kp['x']), int(kp['y'])), 5, CLR_KP, -1)
 
 
-def draw_hud(frame, metrics: dict, frame_idx: int, calib_ok: bool, mode: str):
+def draw_ground_line(frame, ground_y_px: float | None, method: str):
+    """Dibuja la línea del suelo detectado."""
+    if ground_y_px is None:
+        return
     h, w = frame.shape[:2]
-    panel_w = 260
+    y = int(ground_y_px)
+    if 0 < y < h:
+        # Línea punteada verde
+        dash_len = 15
+        for x_start in range(0, w, dash_len * 2):
+            x_end = min(x_start + dash_len, w)
+            cv2.line(frame, (x_start, y), (x_end, y), CLR_GROUND, 2)
+        # Etiqueta
+        label = f"SUELO ({method})"
+        cv2.putText(frame, label, (w - 200, y - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, CLR_GROUND, 1)
+
+
+def draw_angle_arc(frame, kps: dict, trunk_angle: float | None,
+                   shin_angle: float | None):
+    """Dibuja arcos de ángulo sobre el esqueleto."""
+    # ── Trunk angle (mid_shoulder → mid_hip) ─────────────────────────────
+    if trunk_angle is not None:
+        sh_pts = []
+        hi_pts = []
+        for side in ['l', 'r']:
+            sh = kps.get(f'{side}_shoulder')
+            hi = kps.get(f'{side}_hip')
+            if sh and sh['conf'] > 0.4:
+                sh_pts.append(sh)
+            if hi and hi['conf'] > 0.4:
+                hi_pts.append(hi)
+        
+        if sh_pts and hi_pts:
+            mid_sh_x = sum(p['x'] for p in sh_pts) / len(sh_pts)
+            mid_sh_y = sum(p['y'] for p in sh_pts) / len(sh_pts)
+            mid_hi_x = sum(p['x'] for p in hi_pts) / len(hi_pts)
+            mid_hi_y = sum(p['y'] for p in hi_pts) / len(hi_pts)
+
+            # Dibujar arco indicando el ángulo del tronco
+            center = (int(mid_hi_x), int(mid_hi_y))
+            radius = 35
+            # Ángulo del vector tronco (0° = arriba)
+            angle_rad = math.atan2(mid_sh_x - mid_hi_x, mid_hi_y - mid_sh_y)
+            start_angle = -90  # Vertical hacia arriba
+            end_angle = int(-90 + trunk_angle * (1 if mid_sh_x > mid_hi_x else -1))
+            
+            cv2.ellipse(frame, center, (radius, radius),
+                       0, min(start_angle, end_angle), max(start_angle, end_angle),
+                       CLR_ANGLE, 2)
+            
+            # Label del ángulo
+            label_x = int(mid_hi_x + 40)
+            label_y = int(mid_hi_y - 10)
+            cv2.putText(frame, f"{trunk_angle:.0f} deg", (label_x, label_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, CLR_ANGLE, 2)
+
+    # ── Shin angle (ankle → knee) ────────────────────────────────────────
+    if shin_angle is not None:
+        for side in ['l', 'r']:
+            ankle = kps.get(f'{side}_ankle')
+            knee = kps.get(f'{side}_knee')
+            if ankle and knee and ankle['conf'] > 0.5 and knee['conf'] > 0.5:
+                center = (int(ankle['x']), int(ankle['y']))
+                cv2.putText(frame, f"T:{shin_angle:.0f}", 
+                           (center[0] + 10, center[1] - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 220, 255), 1)
+                break  # Solo dibujar uno
+
+
+def draw_hud(frame, metrics: dict, incl_metrics: dict, ground_data: dict,
+             frame_idx: int, calib_ok: bool, mode: str):
+    h, w = frame.shape[:2]
+    panel_w = 280
+    
+    # Calcular altura necesaria del panel
+    num_rows = 5  # Base rows
+    if incl_metrics.get('trunk_angle_deg') is not None:
+        num_rows += 1
+    if incl_metrics.get('shin_angle_deg') is not None:
+        num_rows += 1
+    if incl_metrics.get('squat_depth_pct') is not None:
+        num_rows += 1
+    if incl_metrics.get('hip_angle_deg') is not None:
+        num_rows += 1
+    if incl_metrics.get('knee_valgus_avg_deg') is not None:
+        num_rows += 1
+    if ground_data.get('ground_y_px') is not None:
+        num_rows += 1
+    
+    panel_h = max(160, 22 + num_rows * 28 + 10)
+    
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (panel_w, 160), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
+    cv2.rectangle(overlay, (0, 0), (panel_w, panel_h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.50, frame, 0.50, 0, frame)
 
-    def txt(text, row, color=(220, 220, 220)):
-        cv2.putText(frame, text, (10, 22 + row * 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+    row = [0]  # Mutable counter
 
-    txt(f"Frame {frame_idx}  [{mode.upper()}]", 0)
-    txt(f"Calib: {'OK' if calib_ok else 'Esperar...'}", 1,
+    def txt(text, color=(220, 220, 220)):
+        cv2.putText(frame, text, (10, 22 + row[0] * 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, color, 2)
+        row[0] += 1
+
+    txt(f"Frame {frame_idx}  [{mode.upper()}]")
+    txt(f"Calib: {'OK' if calib_ok else 'Esperar...'}",
         (0, 200, 80) if calib_ok else (0, 80, 255))
-    txt(f"Vista: {metrics.get('view_type', '?').upper()}", 2, (200, 200, 0))
+    txt(f"Vista: {metrics.get('view_type', '?').upper()}", (200, 200, 0))
     bar_str = "Detectada" if metrics.get('has_barbell') else "No detectada"
-    txt(f"Barra: {bar_str}", 3, CLR_BAR if metrics.get('has_barbell') else (80, 80, 255))
+    txt(f"Barra: {bar_str}", CLR_BAR if metrics.get('has_barbell') else (80, 80, 255))
 
     if 'bar_to_midfoot_cm' in metrics:
-        txt(f"Bar-Midfoot: {metrics['bar_to_midfoot_cm']:.1f} cm", 4, (255, 0, 200))
+        txt(f"Bar-Midfoot: {metrics['bar_to_midfoot_cm']:.1f} cm", (255, 0, 200))
+
+    # ── Ground info ──────────────────────────────────────────────────────
+    if ground_data.get('ground_y_px') is not None:
+        method = ground_data.get('ground_method', '?')
+        txt(f"Suelo: {method} (Y={ground_data['ground_y_px']:.0f})", CLR_GROUND)
+
+    # ── Inclination metrics ──────────────────────────────────────────────
+    if incl_metrics.get('trunk_angle_deg') is not None:
+        angle = incl_metrics['trunk_angle_deg']
+        color = CLR_ANGLE if angle < 45 else (0, 80, 255)
+        warning = ""
+        if incl_metrics.get('trunk_warning') == 'good_morning_risk':
+            warning = " ⚠"
+            color = (0, 0, 255)
+        txt(f"Tronco: {angle:.1f} deg{warning}", color)
+
+    if incl_metrics.get('shin_angle_deg') is not None:
+        txt(f"Tibia: {incl_metrics['shin_angle_deg']:.1f} deg", (180, 220, 255))
+
+    if incl_metrics.get('hip_angle_deg') is not None:
+        txt(f"Cadera: {incl_metrics['hip_angle_deg']:.1f} deg", (220, 180, 255))
+
+    if incl_metrics.get('squat_depth_pct') is not None:
+        depth = incl_metrics['squat_depth_pct']
+        if depth < 50:
+            dc = (200, 200, 200)
+        elif depth < 90:
+            dc = (0, 200, 200)
+        else:
+            dc = (0, 255, 0)
+        txt(f"Profundidad: {depth:.0f}%", dc)
+
+    if incl_metrics.get('knee_valgus_avg_deg') is not None:
+        valgus = incl_metrics['knee_valgus_avg_deg']
+        vc = (0, 200, 80) if abs(valgus) < 8 else (0, 80, 255)
+        txt(f"Valgus: {valgus:.1f} deg", vc)
 
     # CoM
     if 'com_x' in metrics:
@@ -215,18 +350,27 @@ def run_calibrate(input_path: str, profile_path: str, height_cm: float):
         print("[FALLO] No se pudo obtener la firma biometrica. Asegurate que el usuario este de frente y erguido.")
 
 
-# ─── Modo: analyze ───────────────────────────────────────────────────────────
+# ─── Modo: analyze / export_training ─────────────────────────────────────────
 
 def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
-                height_cm: float, profile_path: str | None, forced_view: str | None = None):
-    print("\n=== MODO ANÁLISIS ===")
+                height_cm: float, profile_path: str | None, forced_view: str | None = None,
+                export_training: bool = False):
+    print(f"\n=== MODO {'EXPORT TRAINING' if export_training else 'ANÁLISIS'} ===")
     tracker = MediaPipePoseTracker()
     filter_session = PoseFilterSession()
     calibrator = CameraCalibrator(height_cm)
     biomech = BiomechanicsEngine()
     plate_detector = PlateDetector()
     barbell_detector = BarbellDetector()
+    ground_detector = GroundDetector()
+    inclination = InclinationAnalyzer()
     profile = BodyProfile()
+
+    # Training exporter (solo si se solicita)
+    training_exporter = None
+    if export_training:
+        training_path = os.path.splitext(input_path)[0] + "_training.jsonl"
+        training_exporter = TrainingDataExporter(training_path)
 
     if profile_path and profile.load(profile_path):
         calibrator.cm_per_pixel = profile.cm_per_pixel
@@ -280,6 +424,8 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
         pose_result = tracker.process_frame(image_rgb)
 
         row_data = {'frame': frame_idx, 'time_ms': timestamp_ms}
+        incl_metrics = {}
+        ground_data = {'ground_y_px': None, 'ground_method': 'none', 'ground_confidence': 0.0}
 
         if pose_result.keypoints:
             # ── Validar que hay una persona real ────────────────────────────
@@ -338,9 +484,23 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
             rectified = filtered
             if current_view == ViewType.LATERAL:
                 rectified = profile.rectify_lateral(filtered)
+
+            # ── Detección de Suelo ───────────────────────────────────────────
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            ground_data = ground_detector.detect(
+                gray, rectified,
+                cm_per_pixel=calibrator.cm_per_pixel,
+                height_cm=height_cm
+            )
+
+            # ── Análisis de Inclinación ──────────────────────────────────────
+            incl_metrics = inclination.analyze(
+                rectified,
+                view_type=current_view.value,
+                ground_y_px=ground_data.get('ground_y_px')
+            )
             
             # ── Biomecánica ──────────────────────────────────────────────────
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             metrics = biomech.calculate_metrics(rectified, gray, calibrator.px_to_cm, barbell_detector)
             view_type = ViewType(metrics.get('view_type', 'unknown'))
 
@@ -350,11 +510,20 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
                 row_data[f"{name}_y"] = round(kp['y'], 2)
                 row_data[f"{name}_conf"] = round(kp['conf'], 3)
             row_data.update(metrics)
+            
+            # Agregar datos de suelo e inclinación al CSV
+            row_data.update(ground_data)
+            row_data.update(incl_metrics)
 
             # ── Dibujar ──────────────────────────────────────────────────────
             # Pasamos la vista actual para que sepa si debe ocultar el lado lejano
             draw_skeleton(frame, rectified, current_view=view_type.value)
-            draw_hud(frame, metrics, frame_idx, calibrator.calibrated, "analyze")
+            draw_ground_line(frame, ground_data.get('ground_y_px'), ground_data.get('ground_method', '?'))
+            draw_angle_arc(frame, rectified,
+                          incl_metrics.get('trunk_angle_deg'),
+                          incl_metrics.get('shin_angle_deg'))
+            draw_hud(frame, metrics, incl_metrics, ground_data,
+                    frame_idx, calibrator.calibrated, "analyze")
             
             # Platos: Los discos pueden confirmar la barra incluso si el brazo no se ve claro.
             plate_observed = False
@@ -380,8 +549,11 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
                                 active_plate = (px, py, pr)
                                 break # Basta con detectar un disco sólido
 
-            # Validamos la observación con el buffer de persistencia
-            has_barbell_final = barbell_detector.verify_with_buffer(plate_observed)
+            # Integración de observaciones: Frontal (rod) + Lateral (platos) + Posterior (flare)
+            raw_obs = metrics.get('barbell_observed', False) or plate_observed
+            
+            # Validamos con el buffer de persistencia
+            has_barbell_final = barbell_detector.verify_with_buffer(raw_obs)
             metrics['has_barbell'] = has_barbell_final
             row_data['has_barbell'] = has_barbell_final
 
@@ -389,6 +561,18 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
             if has_barbell_final and active_plate:
                 px, py, pr = active_plate
                 cv2.circle(frame, (px, py), pr, CLR_FOOT, 2)
+
+            # ── Export Training Data ─────────────────────────────────────────
+            if training_exporter:
+                training_exporter.add_frame(
+                    frame_idx=frame_idx,
+                    timestamp_ms=timestamp_ms,
+                    view_type=view_type.value,
+                    keypoints=filtered,
+                    ground_data=ground_data,
+                    inclination_data=incl_metrics,
+                    biomech_data=metrics,
+                )
 
         data_rows.append(row_data)
         out.write(frame)
@@ -401,16 +585,26 @@ def run_analyze(input_path: str, output_video_path: str, output_csv_path: str,
     if data_rows:
         pd.DataFrame(data_rows).to_csv(output_csv_path, index=False)
         print(f"Exportado: {output_csv_path}")
+    
+    if training_exporter:
+        training_exporter.flush()
+        summary = training_exporter.get_summary()
+        print(f"\n[Training Export] Resumen:")
+        print(f"  Frames totales: {summary['total_frames']}")
+        print(f"  Vistas: {summary['views']}")
+        print(f"  Con suelo: {summary['frames_with_ground']}")
+        print(f"  Con inclinación: {summary['frames_with_inclination']}")
+
     print("Proceso completado.")
 
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="LiftSense — Motor Biomecánico")
+    parser = argparse.ArgumentParser(description="LiftSense — Motor Biomecánico v2.0")
     parser.add_argument("input",  help="Ruta del video de entrada")
-    parser.add_argument("--mode",    choices=["calibrate", "analyze"], default="analyze",
-                        help="Modo de operación (calibrate = frontal, analyze = ejecución)")
+    parser.add_argument("--mode",    choices=["calibrate", "analyze", "export_training"], default="analyze",
+                        help="Modo de operación (calibrate = frontal, analyze = ejecución, export_training = análisis + JSONL)")
     parser.add_argument("--height",  type=float, default=175.0,
                         help="Altura del usuario en CM")
     parser.add_argument("--profile", default=None,
@@ -428,4 +622,6 @@ if __name__ == "__main__":
     else:
         out_vid = os.path.join(dir_, f"{base}_lstrack.mp4")
         out_csv = os.path.join(dir_, f"{base}_lstrack.csv")
-        run_analyze(args.input, out_vid, out_csv, args.height, args.profile, forced_view=args.view)
+        export_training = args.mode == "export_training"
+        run_analyze(args.input, out_vid, out_csv, args.height, args.profile,
+                   forced_view=args.view, export_training=export_training)

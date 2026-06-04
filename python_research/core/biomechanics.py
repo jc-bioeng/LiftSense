@@ -58,10 +58,13 @@ class BiomechanicsEngine:
             metrics['c7_y'] = c7['y']
 
         # ── 3. Inferencia de barra ────────────────────────────────────────────
-        has_barbell = self._infer_barbell(kps, view, frame_gray, barbell_detector)
-        metrics['has_barbell'] = has_barbell
+        bar_obs = self._observe_barbell(kps, view, frame_gray, barbell_detector)
+        metrics['barbell_observed'] = bar_obs
+        
+        # El estado final (buffer) se calculará externamente para integrar platos
+        metrics['has_barbell'] = bar_obs 
 
-        if has_barbell and c7:
+        if bar_obs and c7:
             metrics['bar_x'] = c7['x']
             metrics['bar_y'] = c7['y']
 
@@ -81,7 +84,7 @@ class BiomechanicsEngine:
             mid_foot_x = sum(foot_xs) / len(foot_xs)
             metrics['mid_foot_x'] = mid_foot_x
 
-            if has_barbell and c7 and px_to_cm_func:
+            if metrics.get('has_barbell') and c7 and px_to_cm_func:
                 diff_px = c7['x'] - mid_foot_x
                 metrics['bar_to_midfoot_cm'] = px_to_cm_func(diff_px)
                 metrics['bar_to_midfoot_px'] = diff_px
@@ -151,32 +154,31 @@ class BiomechanicsEngine:
 
     # ── Inferencia de Barra ──────────────────────────────────────────────────
 
-    def _infer_barbell(self, kps: dict, view: ViewType, frame_gray=None, barbell_detector=None) -> bool:
+    def _observe_barbell(self, kps: dict, view: ViewType, frame_gray=None, barbell_detector=None) -> bool:
         """
         Detecta si el usuario porta una barra según la vista:
-        Usa señales de Pose + Visión Computacional (Hough Lines).
+        Usa señales de Pose + Visión Computacional (Hough Lines / Circles).
         """
         conf = 0.60
         cv_signal = False
-        
-        # ── Señal de Pose ────────────────────────────────────────────────────
         pose_signal = False
+        
+        # ── 1. Señales por Vista ─────────────────────────────────────────────
         if view == ViewType.POSTERIOR:
             pose_signal = self._barbell_by_elbow_flare(kps, conf)
+            if barbell_detector and frame_gray is not None:
+                cv_signal = barbell_detector.detect_frontal_rod(frame_gray, kps)
+
+        elif view == ViewType.FRONTAL:
+            if barbell_detector and frame_gray is not None:
+                cv_signal = barbell_detector.detect_frontal_rod(frame_gray, kps)
+        
         elif view == ViewType.LATERAL:
-            # En lateral, la pose es ambigua (manos arriba para equilibrio).
-            # Desactivamos la sospecha por pose para evitar falsos positivos en sentadilla libre.
-            pose_signal = False
-            cv_signal = False # El PlateDetector en el loop principal se encargará
+            # La detección lateral (platos) se orquesta externamente o mediante CV
+            pass
         
-        # ── Integración Final ────────────────────────────────────────────────
-        # Cambio Crítico: Exigimos evidencia física (CV) para confirmar la barra.
-        # La pose_signal puede usarse internamente, pero queremos asegurar que se VE la barra.
-        obs = cv_signal
-        
-        if barbell_detector:
-            return barbell_detector.verify_with_buffer(obs)
-        return obs
+        # ── 2. Integración Final ─────────────────────────────────────────────
+        return cv_signal or pose_signal
 
     def _barbell_by_elbow_flare(self, kps: dict, conf: float) -> bool:
         """
