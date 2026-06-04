@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:video_player/video_player.dart';
@@ -9,9 +8,12 @@ import 'package:visibility_detector/visibility_detector.dart';
 import 'package:shimmer/shimmer.dart';
 import '../l10n/app_localizations.dart';
 import '../localization/locale_provider.dart';
+import '../main.dart'; // Para routeObserver
 import 'settings_screen.dart';
-import 'analysis_screen.dart';
-import '../main.dart'; // Para acceder al routeObserver global
+import 'analysis/screen/analysis_screen.dart';
+import '../services/app_assets_manager.dart';
+import '../services/local_database_service.dart';
+import 'sensor_capture_screen.dart';
 
 class SquatRecord {
   final String date;
@@ -24,10 +26,9 @@ class SquatRecord {
 }
 
 final List<SquatRecord> _mockHistory = [
-  const SquatRecord('Hoy, 09:41 AM', 'FRONTAL', '46°', 'hi_frontal.mp4', 'frontal.mp4', 'frontal_lstrack.csv'),
-  const SquatRecord('Ayer, 04:20 PM', 'LATERAL', '40°', 'hi_lateral.mp4', 'lateral.mp4', 'lateral_lstrack.csv'),
-  const SquatRecord('Mar 14, 06:15 AM', 'POSTERIOR', '43°', 'hi_posterior.mp4', 'posterior.mp4', 'posterior_lstrack.csv'),
-  const SquatRecord('Mar 10, 08:30 PM', 'CARAC', '48°', 'hi_carac.mp4', 'carac.mp4', 'frontal_lstrack.csv'),
+  const SquatRecord('Hoy, 09:41 AM', 'FRONTAL', '46°', 'frontal_lstrack.mp4', 'frontal_lstrack.mp4', 'frontal_lstrack.csv'),
+  const SquatRecord('Ayer, 04:20 PM', 'LATERAL', '40°', 'lateral_lstrack.mp4', 'lateral_lstrack.mp4', 'lateral_lstrack.csv'),
+  const SquatRecord('Mar 14, 06:15 AM', 'POSTERIOR', '43°', 'posterior_lstrack.mp4', 'posterior_lstrack.mp4', 'posterior_lstrack.csv'),
 ];
 
 class DashboardScreen extends StatefulWidget {
@@ -40,13 +41,38 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   late ScrollController _scrollController;
-
+  List<SquatRecord> _sessions = [];
 
   @override
   void initState() {
     super.initState();
     _scrollController = ScrollController();
-    // setState eliminado: ¡Esto detiene los re-renderizados de toda la página y salva la batería/CPU!
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    AppAssetsManager.instance.restoreAssetsIfMissing();
+    _loadSessions();
+  }
+
+  void _loadSessions() {
+    final saved = LocalDatabaseService.instance.savedRecords;
+    final converted = saved
+        .where((item) {
+          final tag = (item['tag'] ?? '').toString().toUpperCase();
+          return tag != 'CARAC' && tag != 'CALIBRADO' && tag != 'CALIBRACIÓN';
+        })
+        .map((item) {
+          return SquatRecord(
+            item['date'] ?? '',
+            item['tag'] ?? 'CALCULADO',
+            item['maxTrunkAngle'] ?? '40°',
+            item['videoPath'] ?? '',
+            item['previewVideoPath'] ?? '',
+            item['csvPath'] ?? '',
+          );
+        }).toList();
+
+    setState(() {
+      _sessions = [...converted, ..._mockHistory];
+    });
   }
 
   @override
@@ -132,7 +158,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     MaterialPageRoute(
                       builder: (context) => SettingsScreen(localeProvider: widget.localeProvider),
                     ),
-                  );
+                  ).then((_) => _loadSessions());
                 },
               )
             ],
@@ -148,7 +174,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 GestureDetector(
                   onTap: () {
                     HapticFeedback.heavyImpact();
-                    _showCaptureBottomSheet(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const SensorCaptureScreen(),
+                      ),
+                    ).then((_) => _loadSessions());
                   },
                   child: Container(
                     width: double.infinity,
@@ -315,9 +346,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   padding: EdgeInsets.zero, // CRÍTICO: Elimina el espacio fantasma de los ListViews en Flutter
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _mockHistory.length,
+                  itemCount: _sessions.length,
                   itemBuilder: (context, index) {
-                    final record = _mockHistory[index];
+                    final record = _sessions[index];
                     return GestureDetector(
                       onTap: () {
                         Navigator.push(
@@ -331,7 +362,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               captureDate: record.date,
                             ),
                           ),
-                        );
+                        ).then((_) => _loadSessions());
                       },
                       child: _buildHistoryCard(context, index, record),
                     );
@@ -351,139 +382,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return HistoryCardWidget(
       index: index,
       record: record,
-      totalLength: _mockHistory.length,
+      totalLength: _sessions.length,
     );
   }
 
-  void _showCaptureBottomSheet(BuildContext context) {
-    final l10n = AppLocalizations.of(context)!;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (context) {
-        return Container(
-          padding: const EdgeInsets.all(32),
-          decoration: BoxDecoration(
-            color: const Color(0xFF0C0C0C),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
-            border: Border(top: BorderSide(color: Theme.of(context).colorScheme.tertiary, width: 3)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                l10n.dataOrigin,
-                style: GoogleFonts.inter(fontSize: 24, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: Colors.white),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                l10n.sagittalRequired,
-                style: GoogleFonts.inter(fontSize: 12, color: Colors.white54),
-              ),
-              const SizedBox(height: 32),
-              _buildBottomSheetOption(
-                context,
-                icon: Icons.camera_enhance_sharp,
-                title: l10n.liveSensor,
-                subtitle: l10n.cameraRt,
-                onTap: () => _triggerAnalysisExtration(context),
-              ),
-              const SizedBox(height: 16),
-              _buildBottomSheetOption(
-                context,
-                icon: Icons.snippet_folder_sharp,
-                title: l10n.diskIngest,
-                subtitle: l10n.localClip,
-                onTap: () => _triggerAnalysisExtration(context),
-              ),
-              const SizedBox(height: 24),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildBottomSheetOption(BuildContext context, {required IconData icon, required String title, required String subtitle, required VoidCallback onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: Colors.black,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFF333333)),
-        ),
-        child: Row(
-          children: [
-            Icon(icon, color: Theme.of(context).colorScheme.primary, size: 28),
-            const SizedBox(width: 20),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w600, letterSpacing: -0.5, color: Colors.white)),
-                  Text(subtitle, style: GoogleFonts.inter(fontSize: 11, color: Colors.white54)),
-                ],
-              ),
-            ),
-            Icon(Icons.arrow_forward_ios, color: Theme.of(context).colorScheme.primary, size: 14),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _triggerAnalysisExtration(BuildContext context) {
-    HapticFeedback.selectionClick();
-    Navigator.pop(context); // Cerrar bottom sheet
-
-    // Simular Pipeline Logs
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => Center(
-        child: Container(
-          width: 300,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Theme.of(context).colorScheme.primary, width: 2),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('>> EXTRACTING KINEMATICS', style: GoogleFonts.inter(fontSize: 12, color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              LinearProgressIndicator(color: Theme.of(context).colorScheme.primary, backgroundColor: const Color(0xFF222222)),
-              const SizedBox(height: 16),
-              Text('Spine [C7_Pelvis] ... [OK]\nComputing Euler ... [WAIT]', style: GoogleFonts.inter(fontSize: 10, color: Colors.white54)),
-            ],
-          ),
-        ),
-      ),
-    );
-
-    Future.delayed(const Duration(seconds: 2), () {
-      Navigator.pop(context); // cerrar loader
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => const AnalysisScreen(
-            videoPath: 'frontal.mp4',
-            csvPath: 'frontal_lstrack.csv',
-            exerciseName: 'BACK SQUAT',
-            viewTag: 'FRONTAL',
-            captureDate: 'Hoy, 09:41 AM',
-          ),
-        ),
-      );
-    });
-  }
 }
 
 class HistoryCardWidget extends StatefulWidget {
@@ -538,8 +440,13 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
 
   Future<void> _initVideo() async {
     if (_videoController != null) return;
-    final docsDir = await getApplicationDocumentsDirectory();
-    final file = File('${docsDir.path}/${widget.record.previewVideoPath}');
+    
+    final path = await AppAssetsManager.instance.resolveFilePath(widget.record.previewVideoPath);
+    if (path == null) {
+      debugPrint('Video path not found for: ${widget.record.previewVideoPath}');
+      return;
+    }
+    final file = File(path);
     if (!file.existsSync()) return;
 
     final controller = VideoPlayerController.file(
@@ -581,172 +488,180 @@ class _HistoryCardWidgetState extends State<HistoryCardWidget> with RouteAware {
         if (info.visibleFraction == 0) {
           _videoController?.pause();
         } else {
-          // Solo darle play si la ruta actual es el dashboard
-          // (evita que se reproduzcan de fondo cuando estamos en Análisis)
           _videoController?.play();
         }
       },
       child: Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      clipBehavior: Clip.hardEdge,
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: const Color(0xFF222222),
-          width: 1,
+        margin: const EdgeInsets.only(bottom: 12),
+        clipBehavior: Clip.hardEdge,
+        decoration: BoxDecoration(
+          color: const Color(0xFF141416),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.05),
+            width: 0.8,
+          ),
+          gradient: LinearGradient(
+            colors: [
+              const Color(0xFF141416),
+              const Color(0xFF1C1C1E).withValues(alpha: 0.8),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
         ),
-      ),
-      child: Stack(
-        children: [
-          // Video de fondo con opacidad baja
-          if (_videoReady && _videoController != null)
-            Positioned.fill(
-              child: Opacity(
-                opacity: 0.15,
-                child: FittedBox(
-                  fit: BoxFit.cover,
-                  child: SizedBox(
-                    width: _videoController!.value.size.width,
-                    height: _videoController!.value.size.height,
-                    child: VideoPlayer(_videoController!),
+        child: Stack(
+          children: [
+            // Video de fondo con opacidad baja
+            if (_videoReady && _videoController != null)
+              Positioned.fill(
+                child: Opacity(
+                  opacity: 0.15,
+                  child: FittedBox(
+                    fit: BoxFit.cover,
+                    child: SizedBox(
+                      width: _videoController!.value.size.width,
+                      height: _videoController!.value.size.height,
+                      child: VideoPlayer(_videoController!),
+                    ),
+                  ),
+                ),
+              )
+            else
+              // Shimmer effect while video is loading
+              Positioned.fill(
+                child: Shimmer.fromColors(
+                  baseColor: const Color(0xFF1A1A1A),
+                  highlightColor: const Color(0xFF2A2A2A),
+                  period: const Duration(milliseconds: 1500),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.black,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
                   ),
                 ),
               ),
-            )
-          else
-            // Shimmer effect while video is loading
-            Positioned.fill(
-              child: Shimmer.fromColors(
-                baseColor: const Color(0xFF1A1A1A),
-                highlightColor: const Color(0xFF2A2A2A),
-                period: const Duration(milliseconds: 1500),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Colors.black,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                ),
-              ),
-            ),
 
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                    child: Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.2),
-                          width: 0.5,
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  // Glassmorphic index badge
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.03),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.08),
+                            width: 0.5,
+                          ),
                         ),
-                      ),
-                      child: Center(
-                        child: Text(
-                          '0${widget.totalLength - widget.index}',
-                          style: GoogleFonts.inter(
-                            color: Colors.white.withValues(alpha: 0.9),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
+                        child: Center(
+                          child: Text(
+                            '0${widget.totalLength - widget.index}',
+                            style: GoogleFonts.inter(
+                              color: Colors.white.withValues(alpha: 0.7),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Text(
-                            'BACK SQUAT',
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: -0.5,
-                              color: Colors.white,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(6),
-                              color: widget.record.tag == 'PR'
-                                  ? Theme.of(context).colorScheme.tertiary.withValues(alpha: 0.2)
-                                  : Theme.of(context).colorScheme.primary.withValues(alpha: 0.2),
-                              border: Border.all(
-                                color: widget.record.tag == 'PR'
-                                    ? Theme.of(context).colorScheme.tertiary
-                                    : Theme.of(context).colorScheme.primary,
-                              ),
-                            ),
-                            child: Text(
-                              widget.record.tag,
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              'BACK SQUAT',
                               style: GoogleFonts.inter(
-                                fontSize: 9,
-                                color: widget.record.tag == 'PR'
-                                    ? Theme.of(context).colorScheme.tertiary
-                                    : Theme.of(context).colorScheme.primary,
-                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: -0.3,
+                                color: Colors.white,
                               ),
                             ),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(6),
+                                color: widget.record.tag == 'PR' || widget.record.tag == 'POSTERIOR'
+                                    ? Theme.of(context).colorScheme.tertiary.withValues(alpha: 0.15)
+                                    : Theme.of(context).colorScheme.primary.withValues(alpha: 0.15),
+                                border: Border.all(
+                                  color: widget.record.tag == 'PR' || widget.record.tag == 'POSTERIOR'
+                                      ? Theme.of(context).colorScheme.tertiary.withValues(alpha: 0.4)
+                                      : Theme.of(context).colorScheme.primary.withValues(alpha: 0.4),
+                                ),
+                              ),
+                              child: Text(
+                                widget.record.tag,
+                                style: GoogleFonts.inter(
+                                  fontSize: 8,
+                                  color: widget.record.tag == 'PR' || widget.record.tag == 'POSTERIOR'
+                                      ? Theme.of(context).colorScheme.tertiary
+                                      : Theme.of(context).colorScheme.primary,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          widget.record.date,
+                          style: GoogleFonts.inter(
+                            fontSize: 10,
+                            color: Colors.white38,
+                            fontWeight: FontWeight.w500,
                           ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                       Text(
-                        widget.record.date,
+                        widget.record.maxTrunkAngle,
                         style: GoogleFonts.inter(
-                          fontSize: 11,
-                          color: Colors.white54,
-                          fontWeight: FontWeight.w500,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.5,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'INCLINACIÓN',
+                        style: GoogleFonts.inter(
+                          fontSize: 8,
+                          letterSpacing: 0.5,
+                          fontWeight: FontWeight.w600,
+                          color: Theme.of(context).colorScheme.primary,
                         ),
                       ),
                     ],
-                  ),
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      widget.record.maxTrunkAngle,
-                      style: GoogleFonts.inter(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -1.0,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'INCLINACIÓN',
-                      style: GoogleFonts.inter(
-                        fontSize: 9,
-                        letterSpacing: 0.5,
-                        fontWeight: FontWeight.w600,
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                    ),
-                  ],
-                )
-              ],
-            ),
-          )
-        ],
+                  )
+                ],
+              ),
+            )
+          ],
+        ),
       ),
-    ),
-  );
-}
+    );
+  }
 }

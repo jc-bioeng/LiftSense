@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
 
 class SkeletonPainterView extends StatefulWidget {
   final String csvPath;
@@ -117,7 +116,7 @@ class _SkeletonPainterViewState extends State<SkeletonPainterView>
     int lo = 0, hi = _frames.length - 1;
     while (lo < hi) {
       final mid = (lo + hi) ~/ 2;
-      if (_frames[mid].$1 < posMs) lo = mid + 1; else hi = mid;
+      if (_frames[mid].$1 < posMs) { lo = mid + 1; } else { hi = mid; }
     }
     return lo;
   }
@@ -180,7 +179,7 @@ class _SkeletonFramePainter extends CustomPainter {
       final cp1 = c(p1), cp2 = c(p2);
       final grp = i < connectionGroups.length ? connectionGroups[i] : 0;
       final color = grp == 0 ? const Color(0xFF00D4AA) : (grp == 1 ? const Color(0xFF4FC3F7) : const Color(0xFFFFB627));
-      canvas.drawLine(cp1, cp2, paint..color = color.withOpacity(0.85)..strokeWidth = 3.5);
+      canvas.drawLine(cp1, cp2, paint..color = color.withValues(alpha: 0.85)..strokeWidth = 3.5);
     }
   }
 

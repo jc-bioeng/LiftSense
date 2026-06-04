@@ -1,6 +1,11 @@
+import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../../services/biomech_frame_bus.dart';
+import '../../domain/biomech_frame_realtime.dart';
+import '../../domain/vbt_summary.dart';
 
 // ═══════════════════════════════════════════════════════════════
 //  DESIGN TOKENS — Mantiene coherencia con dashboard identity
@@ -44,104 +49,115 @@ class KinematicBiasTracker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    // Mock data: trunk incl. 42.1° vs tibia incl. 28.4° → diff +13.7° → HIP BIAS
-    const trunkAngle = 42.1;
-    const tibiaAngle = 28.4;
-    const diff = trunkAngle - tibiaAngle; // +13.7° → hip dominant
+    final bus = BiomechFrameBus.instance;
 
-    String biasLabel;
-    String biasDesc;
-    Color biasColor;
-    if (diff > 10) {
-      biasLabel = 'SESGO DE CADERA';
-      biasDesc = 'Tu tronco se inclina ${diff.toStringAsFixed(1)}° más que la tibia.\nLa cadena posterior (glúteos) absorbe la mayor carga.';
-      biasColor = colors.primary;
-    } else if (diff < -10) {
-      biasLabel = 'SESGO DE RODILLA';
-      biasDesc = 'La tibia avanza ${(-diff).toStringAsFixed(1)}° más que el tronco.\nEl cuádriceps soporta la mayor demanda articular.';
-      biasColor = const Color(0xFF007BFF);
-    } else {
-      biasLabel = 'NEUTRAL';
-      biasDesc = 'Diferencia de ${diff.toStringAsFixed(1)}°. Distribución equilibrada\nentre extensores de cadera y rodilla (ratio ≈ 1.0).';
-      biasColor = const Color(0xFFFFB627);
-    }
+    return ValueListenableBuilder<BiomechFrameRealtime>(
+      valueListenable: bus.frameNotifier,
+      builder: (context, frame, _) {
+        final trunkAngle = frame.trunkAngle;
+        final tibiaAngle = frame.tibiaAngle;
+        final diff = frame.hipBias;
 
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: _panelDecoration(topBorderColor: biasColor.withValues(alpha: 0.3)),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header with bias classification
-          Row(
+        String biasLabel;
+        String biasDesc;
+        Color biasColor;
+        
+        if (diff > 8) {
+          biasLabel = 'SESGO DE CADERA';
+          biasDesc = 'Tu tronco se inclina ${diff.toStringAsFixed(1)}° más que la tibia.\nLa cadena posterior (glúteos) absorbe la mayor carga.';
+          biasColor = colors.primary;
+        } else if (diff < -8) {
+          biasLabel = 'SESGO DE RODILLA';
+          biasDesc = 'La tibia avanza ${(-diff).toStringAsFixed(1)}° más que el tronco.\nEl cuádriceps soporta la mayor demanda articular.';
+          biasColor = const Color(0xFF007BFF);
+        } else {
+          biasLabel = 'NEUTRAL';
+          biasDesc = 'Diferencia de ${diff.toStringAsFixed(1)}°. Distribución equilibrada\nentre extensores de cadera y rodilla (ratio ≈ 1.0).';
+          biasColor = const Color(0xFFFFB627);
+        }
+
+        // Heurística de contribución muscular
+        final double glutePct = (50 + diff * 1.8).clamp(20, 80);
+        final double quadPct = 100 - glutePct;
+
+        return Container(
+          padding: const EdgeInsets.all(20),
+          decoration: _panelDecoration(topBorderColor: biasColor.withValues(alpha: 0.3)),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 4,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: biasColor,
-                  borderRadius: BorderRadius.circular(2),
+              // Header with bias classification
+              Row(
+                children: [
+                  Container(
+                    width: 4,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: biasColor,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(biasLabel, style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: biasColor)),
+                      const SizedBox(height: 2),
+                      Text('Clasificación dinámica automática', style: _label()),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+
+              // Angle comparison row
+              Row(
+                children: [
+                  _buildAngleChip('TRONCO', trunkAngle, colors.primary),
+                  const SizedBox(width: 10),
+                  _buildAngleChip('TIBIA', tibiaAngle, const Color(0xFF007BFF)),
+                  const SizedBox(width: 10),
+                  _buildAngleChip('ΔDIF', diff, biasColor),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // Description
+              Text(biasDesc, style: _body()),
+
+              const SizedBox(height: 12),
+
+              // Muscle contribution bar
+              Text('CONTRIBUCIÓN ESTIMADA', style: _label()),
+              const SizedBox(height: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: glutePct.toInt(),
+                      child: Container(height: 8, color: colors.primary),
+                    ),
+                    const SizedBox(width: 2),
+                    Expanded(
+                      flex: quadPct.toInt(),
+                      child: Container(height: 8, color: const Color(0xFF007BFF)),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              const SizedBox(height: 6),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(biasLabel, style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: biasColor)),
-                  const SizedBox(height: 2),
-                  Text('Clasificación dinámica automática', style: _label()),
+                  Text('Glúteo · Isquio  ${glutePct.toStringAsFixed(0)}%', style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: colors.primary)),
+                  Text('Cuádriceps  ${quadPct.toStringAsFixed(0)}%', style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: const Color(0xFF007BFF))),
                 ],
               ),
             ],
           ),
-          const SizedBox(height: 20),
-
-          // Angle comparison row
-          Row(
-            children: [
-              _buildAngleChip('TRONCO', trunkAngle, colors.primary),
-              const SizedBox(width: 10),
-              _buildAngleChip('TIBIA', tibiaAngle, const Color(0xFF007BFF)),
-              const SizedBox(width: 10),
-              _buildAngleChip('ΔDIF', diff, biasColor),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // Description
-          Text(biasDesc, style: _body()),
-
-          const SizedBox(height: 12),
-
-          // Muscle contribution bar
-          Text('CONTRIBUCIÓN ESTIMADA', style: _label()),
-          const SizedBox(height: 8),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: Row(
-              children: [
-                Expanded(
-                  flex: 65,
-                  child: Container(height: 8, color: colors.primary),
-                ),
-                const SizedBox(width: 2),
-                Expanded(
-                  flex: 35,
-                  child: Container(height: 8, color: const Color(0xFF007BFF)),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 6),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('Glúteo · Isquio  65%', style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: colors.primary)),
-              Text('Cuádriceps  35%', style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: const Color(0xFF007BFF))),
-            ],
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -177,122 +193,97 @@ class JointAngleTimeSeriesChart extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final bus = BiomechFrameBus.instance;
 
-    // Mock kinematic data: angle vs % of squat cycle
-    final hipData = [
-      const FlSpot(0, 5), const FlSpot(10, 20), const FlSpot(20, 42),
-      const FlSpot(30, 65), const FlSpot(40, 82), const FlSpot(50, 92),  // max depth
-      const FlSpot(60, 80), const FlSpot(70, 55), const FlSpot(80, 30),
-      const FlSpot(90, 12), const FlSpot(100, 5),
-    ];
-    final kneeData = [
-      const FlSpot(0, 8), const FlSpot(10, 28), const FlSpot(20, 55),
-      const FlSpot(30, 78), const FlSpot(40, 100), const FlSpot(50, 119),
-      const FlSpot(60, 105), const FlSpot(70, 72), const FlSpot(80, 40),
-      const FlSpot(90, 18), const FlSpot(100, 8),
-    ];
-    final ankleData = [
-      const FlSpot(0, 2), const FlSpot(10, 6), const FlSpot(20, 12),
-      const FlSpot(30, 18), const FlSpot(40, 24), const FlSpot(50, 28),
-      const FlSpot(60, 25), const FlSpot(70, 18), const FlSpot(80, 10),
-      const FlSpot(90, 5), const FlSpot(100, 2),
-    ];
-
-    return Container(
-      height: 240,
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
-      decoration: _panelDecoration(),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Legend
-          Row(
-            children: [
-              _legendDot('Cadera', colors.primary),
-              const SizedBox(width: 16),
-              _legendDot('Rodilla', const Color(0xFF007BFF)),
-              const SizedBox(width: 16),
-              _legendDot('Tobillo', const Color(0xFFFFB627)),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Expanded(
-            child: LineChart(
-              LineChartData(
-                gridData: FlGridData(
-                  show: true,
-                  drawVerticalLine: false,
-                  horizontalInterval: 30,
-                  getDrawingHorizontalLine: (value) => FlLine(
-                    color: Colors.white.withValues(alpha: 0.05),
-                    strokeWidth: 1,
-                  ),
-                ),
-                titlesData: FlTitlesData(
-                  bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      interval: 25,
-                      getTitlesWidget: (value, meta) {
-                        String label;
-                        switch (value.toInt()) {
-                          case 0: label = 'INICIO'; break;
-                          case 50: label = 'FONDO'; break;
-                          case 100: label = 'FIN'; break;
-                          default: label = '${value.toInt()}%';
-                        }
-                        return Padding(
-                          padding: const EdgeInsets.only(top: 6),
-                          child: Text(label, style: GoogleFonts.inter(fontSize: 8, color: Colors.white30, fontWeight: FontWeight.w500)),
-                        );
-                      },
-                    ),
-                  ),
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 32,
-                      interval: 30,
-                      getTitlesWidget: (value, meta) => Text(
-                        '${value.toInt()}°',
-                        style: GoogleFonts.inter(fontSize: 9, color: Colors.white30),
-                      ),
-                    ),
-                  ),
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                ),
-                borderData: FlBorderData(show: false),
-                minX: 0, maxX: 100,
-                minY: 0, maxY: 130,
-                lineBarsData: [
-                  _buildLine(hipData, colors.primary),
-                  _buildLine(kneeData, const Color(0xFF007BFF)),
-                  _buildLine(ankleData, const Color(0xFFFFB627)),
-                ],
-                // Phase annotation: bottom marker
-                extraLinesData: ExtraLinesData(
-                  verticalLines: [
-                    VerticalLine(
-                      x: 50,
-                      color: Colors.white.withValues(alpha: 0.15),
-                      strokeWidth: 1,
-                      dashArray: [4, 4],
-                      label: VerticalLineLabel(
-                        show: true,
-                        alignment: Alignment.topRight,
-                        style: GoogleFonts.inter(fontSize: 8, color: Colors.white30),
-                        labelResolver: (_) => 'Máx. Flexión',
-                      ),
-                    ),
-                  ],
-                ),
+    return ValueListenableBuilder<List<Float32List>>(
+      valueListenable: bus.seriesNotifier,
+      builder: (context, series, _) {
+        if (series.isEmpty || series[0].isEmpty) {
+          return Container(
+            height: 240,
+            decoration: _panelDecoration(),
+            child: const Center(
+              child: Text(
+                'Cargando cinemática...',
+                style: TextStyle(color: Colors.white54),
               ),
             ),
+          );
+        }
+
+        final hipData = _mapToSpots(series[0]);
+        final kneeData = _mapToSpots(series[1]);
+        final ankleData = _mapToSpots(series[2]);
+
+        return Container(
+          height: 240,
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
+          decoration: _panelDecoration(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  _legendDot('Cadera', colors.primary),
+                  const SizedBox(width: 16),
+                  _legendDot('Rodilla', const Color(0xFF007BFF)),
+                  const SizedBox(width: 16),
+                  _legendDot('Tobillo', const Color(0xFFFFB627)),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Expanded(
+                child: LineChart(
+                  LineChartData(
+                    lineTouchData: const LineTouchData(enabled: false),
+                    gridData: FlGridData(
+                      show: true,
+                      drawVerticalLine: false,
+                      horizontalInterval: 45,
+                      getDrawingHorizontalLine: (value) => FlLine(
+                        color: Colors.white.withValues(alpha: 0.05),
+                        strokeWidth: 1,
+                      ),
+                    ),
+                    titlesData: FlTitlesData(
+                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          interval: 25,
+                          getTitlesWidget: (value, meta) {
+                            if (value % 25 != 0) return const SizedBox();
+                            return Text('${value.toInt()}%', style: _label());
+                          },
+                        ),
+                      ),
+                    ),
+                    borderData: FlBorderData(show: false),
+                    lineBarsData: [
+                      _buildLine(hipData, colors.primary),
+                      _buildLine(kneeData, const Color(0xFF007BFF)),
+                      _buildLine(ankleData, const Color(0xFFFFB627)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
+  }
+
+  List<FlSpot> _mapToSpots(Float32List data) {
+    if (data.isEmpty) return [];
+    final step = (data.length / 50).clamp(1, 100).toInt();
+    final spots = <FlSpot>[];
+    for (int i = 0; i < data.length; i += step) {
+      final percent = (i / (data.length - 1)) * 100;
+      spots.add(FlSpot(percent, data[i]));
+    }
+    return spots;
   }
 
   LineChartBarData _buildLine(List<FlSpot> spots, Color color) {
@@ -334,122 +325,227 @@ class JointLoadsChart extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
 
-    // Mock clinical loads (N/kg body weight) from research
-    // ACL Shear ~450N, PCL Shear ~800N, Patellofemoral ~4200N, Lumbar Axial ~7200N
-    // Normalized to max for chart
-    final loads = [
-      {'label': 'LCA\nCizalla', 'value': 450.0, 'max': 2000.0, 'color': colors.primary, 'unit': '450 N'},
-      {'label': 'LCP\nCizalla', 'value': 800.0, 'max': 4000.0, 'color': const Color(0xFF007BFF), 'unit': '800 N'},
-      {'label': 'Rótula\nCompresión', 'value': 4200.0, 'max': 5000.0, 'color': colors.tertiary, 'unit': '4.2 kN'},
-      {'label': 'Lumbar\nAxial', 'value': 7200.0, 'max': 8000.0, 'color': const Color(0xFF8B5CF6), 'unit': '7.2 kN'},
-    ];
+    return ValueListenableBuilder<BiomechFrameRealtime>(
+      valueListenable: BiomechFrameBus.instance.frameNotifier,
+      builder: (context, frame, child) {
+        final bool isMock = frame.isEmpty || frame.metricsBuffer.isEmpty;
 
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: _panelDecoration(),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Warning header if any load approaches tissue limit
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: colors.tertiary.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.monitor_heart_outlined, color: colors.tertiary, size: 14),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Compresión rotuliana en zona de atención (84% del umbral)',
-                    style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: colors.tertiary),
-                  ),
+        double aclValue = 450.0;
+        double pclValue = 800.0;
+        double patellaValue = 4200.0;
+        double lumbarValue = 7200.0;
+
+        if (!isMock) {
+          final kneeAngle = frame.kneeAngle;
+          final trunkAngle = frame.trunkAngle;
+
+          final kneeFlexion = (180.0 - kneeAngle).clamp(0.0, 130.0);
+          final trunkLean = trunkAngle.clamp(0.0, 60.0);
+
+          // LCA Cizalla: peaks at 15°-45° flexion, drops in deep flexion
+          if (kneeFlexion <= 45.0) {
+            aclValue = 100.0 + 350.0 * sin((kneeFlexion / 45.0) * (pi / 2.0));
+          } else {
+            aclValue = 100.0 + 350.0 * cos(((kneeFlexion - 45.0) / 75.0) * (pi / 2.0));
+          }
+
+          // LCP Cizalla: increases with deep flexion
+          pclValue = 100.0 + 700.0 * (kneeFlexion / 120.0);
+
+          // Rótula Compresión: increases with knee flexion
+          patellaValue = 200.0 + 4000.0 * pow(kneeFlexion / 110.0, 1.5);
+
+          // Lumbar Axial: increases with trunk lean
+          lumbarValue = 1200.0 + 6000.0 * pow(trunkLean / 50.0, 1.3);
+        }
+
+        final aclMax = 2000.0;
+        final pclMax = 4000.0;
+        final patellaMax = 5000.0;
+        final lumbarMax = 8000.0;
+
+        final aclPct = aclValue / aclMax;
+        final pclPct = pclValue / pclMax;
+        final patellaPct = patellaValue / patellaMax;
+        final lumbarPct = lumbarValue / lumbarMax;
+
+        // Determinar advertencia
+        String warningMsg = 'Cargas articulares en rangos óptimos y tolerables.';
+        Color warningColor = const Color(0xFF00D4AA); // Teal / Safe
+        IconData warningIcon = Icons.check_circle_outline_rounded;
+
+        if (patellaPct > 0.8) {
+          warningMsg = 'Compresión rotuliana en zona de atención (${(patellaPct * 100).toStringAsFixed(0)}% del umbral)';
+          warningColor = colors.tertiary;
+          warningIcon = Icons.warning_amber_rounded;
+        } else if (lumbarPct > 0.8) {
+          warningMsg = 'Carga axial lumbar elevada (${(lumbarPct * 100).toStringAsFixed(0)}% del umbral). Evita redondear la espalda.';
+          warningColor = colors.tertiary;
+          warningIcon = Icons.warning_amber_rounded;
+        } else if (aclPct > 0.8) {
+          warningMsg = 'Fuerza de cizalla del LCA elevada. Reduce la velocidad de descenso.';
+          warningColor = colors.tertiary;
+          warningIcon = Icons.warning_amber_rounded;
+        } else if (pclPct > 0.8) {
+          warningMsg = 'Fuerza de cizalla del LCP elevada.';
+          warningColor = colors.tertiary;
+          warningIcon = Icons.warning_amber_rounded;
+        } else if (patellaPct > 0.6 || lumbarPct > 0.6) {
+          warningMsg = 'Demanda articular moderada. Carga y reclutamiento óptimos.';
+          warningColor = const Color(0xFFFFB627); // Amber
+          warningIcon = Icons.info_outline_rounded;
+        }
+
+        final loads = [
+          {
+            'label': 'LCA\nCizalla',
+            'value': aclValue,
+            'max': aclMax,
+            'color': colors.primary,
+            'unit': '${aclValue.toStringAsFixed(0)} N',
+          },
+          {
+            'label': 'LCP\nCizalla',
+            'value': pclValue,
+            'max': pclMax,
+            'color': const Color(0xFF007BFF),
+            'unit': '${pclValue.toStringAsFixed(0)} N',
+          },
+          {
+            'label': 'Rótula\nCompresión',
+            'value': patellaValue,
+            'max': patellaMax,
+            'color': colors.tertiary,
+            'unit': '${(patellaValue / 1000).toStringAsFixed(1)} kN',
+          },
+          {
+            'label': 'Lumbar\nAxial',
+            'value': lumbarValue,
+            'max': lumbarMax,
+            'color': const Color(0xFF8B5CF6),
+            'unit': '${(lumbarValue / 1000).toStringAsFixed(1)} kN',
+          },
+        ];
+
+        return Container(
+          padding: const EdgeInsets.all(20),
+          decoration: _panelDecoration(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Dynamic warning header
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: warningColor.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
                 ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-
-          // Load bars
-          ...loads.map((d) {
-            final pct = (d['value'] as double) / (d['max'] as double);
-            final color = d['color'] as Color;
-            final isHigh = pct > 0.8;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        (d['label'] as String).replaceAll('\n', ' '),
-                        style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: Colors.white54),
+                child: Row(
+                  children: [
+                    Icon(warningIcon, color: warningColor, size: 14),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        warningMsg,
+                        style: GoogleFonts.inter(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: warningColor),
                       ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Load bars
+              ...loads.map((d) {
+                final pct = (d['value'] as double) / (d['max'] as double);
+                final color = d['color'] as Color;
+                final isHigh = pct > 0.8;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
                       Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text(
-                            d['unit'] as String,
-                            style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: isHigh ? color : Colors.white),
+                            (d['label'] as String).replaceAll('\n', ' '),
+                            style: GoogleFonts.inter(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white54),
                           ),
-                          if (isHigh) ...[
-                            const SizedBox(width: 6),
-                            Icon(Icons.warning_amber_rounded, size: 12, color: color),
-                          ],
+                          Row(
+                            children: [
+                              Text(
+                                d['unit'] as String,
+                                style: GoogleFonts.inter(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    color: isHigh ? color : Colors.white),
+                              ),
+                              if (isHigh) ...[
+                                const SizedBox(width: 6),
+                                Icon(Icons.warning_amber_rounded,
+                                    size: 12, color: color),
+                              ],
+                            ],
+                          ),
                         ],
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Stack(
-                    children: [
-                      Container(
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.05),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                      FractionallySizedBox(
-                        widthFactor: pct.clamp(0.0, 1.0),
-                        child: Container(
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: color,
-                            borderRadius: BorderRadius.circular(4),
+                      const SizedBox(height: 6),
+                      Stack(
+                        children: [
+                          Container(
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.05),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
                           ),
-                        ),
+                          FractionallySizedBox(
+                            widthFactor: pct.clamp(0.0, 1.0),
+                            child: Container(
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: color,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                            ),
+                          ),
+                          // Tissue limit marker
+                          Positioned(
+                            left: null,
+                            right: 0,
+                            child: Container(
+                              width: 1.5,
+                              height: 8,
+                              color: Colors.white.withValues(alpha: 0.3),
+                            ),
+                          ),
+                        ],
                       ),
-                      // Tissue limit marker
-                      Positioned(
-                        left: null,
-                        right: 0,
-                        child: Container(
-                          width: 1.5,
-                          height: 8,
-                          color: Colors.white.withValues(alpha: 0.3),
+                      const SizedBox(height: 2),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Text(
+                          'Límite tejido: ${(d['max'] as double).toInt()} N',
+                          style: GoogleFonts.inter(
+                              fontSize: 8, color: Colors.white24),
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 2),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: Text(
-                      'Límite tejido: ${(d['max'] as double).toInt()} N',
-                      style: GoogleFonts.inter(fontSize: 8, color: Colors.white24),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }),
-        ],
-      ),
+                );
+              }),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -652,162 +748,204 @@ class VelocityTrainingChart extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
 
-    // Mock VBT data: MPV per rep (m/s)
-    // Rep 1 = 0.82, progresando hasta fatiga en Rep 8
-    final mpvData = [
-      const FlSpot(1, 0.82), const FlSpot(2, 0.78), const FlSpot(3, 0.74),
-      const FlSpot(4, 0.70), const FlSpot(5, 0.65), const FlSpot(6, 0.61),
-      const FlSpot(7, 0.57), const FlSpot(8, 0.52),
-    ];
+    return ValueListenableBuilder<VbtSummary>(
+      valueListenable: BiomechFrameBus.instance.vbtNotifier,
+      builder: (context, vbt, child) {
+        final bool isMock = vbt.isEmpty;
 
-    // Velocity loss threshold at 30% = 0.82 * 0.70 = 0.574
-    const lossThreshold = 0.574;
-    // Rep where it crosses = Rep 7 (0.57 ≈ threshold)
-    const dropOffPct = 36.6; // (0.82 - 0.52) / 0.82 * 100
+        // Fallback data if empty
+        final List<double> meanVelocities = isMock
+            ? [0.82, 0.78, 0.74, 0.70, 0.65, 0.61, 0.57, 0.52]
+            : vbt.repMeanVelocities;
 
-    return Container(
-      height: 340,
-      padding: const EdgeInsets.all(20),
-      decoration: _panelDecoration(),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Rep counter
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        final double firstMean = meanVelocities.first;
+
+        // Umbral de pérdida de velocidad al -30% basado en la primera repetición
+        final double lossThreshold = firstMean * 0.70;
+        final double dropOffPctVal = isMock
+            ? 36.6
+            : vbt.velocityLossPercent.abs();
+
+        // Crear FlSpots
+        final mpvSpots = <FlSpot>[];
+        for (int i = 0; i < meanVelocities.length; i++) {
+          mpvSpots.add(FlSpot((i + 1).toDouble(), meanVelocities[i]));
+        }
+
+        // Determinar si hay alguna repetición que cruza el umbral
+        int cutRepIndex = -1;
+        for (int i = 0; i < meanVelocities.length; i++) {
+          if (meanVelocities[i] <= lossThreshold) {
+            cutRepIndex = i + 1;
+            break;
+          }
+        }
+
+        String recommendationMsg = 'Mantén la velocidad de ejecución. Fatiga controlada y segura.';
+        if (cutRepIndex != -1) {
+          recommendationMsg = 'Recomendación: Cortar serie en Rep $cutRepIndex. La fatiga excede el umbral del -30%.';
+        } else if (dropOffPctVal > 20.0) {
+          recommendationMsg = 'Recomendación: Considera terminar la serie. Pérdida de velocidad moderada (${dropOffPctVal.toStringAsFixed(0)}%).';
+        }
+
+        // Dinamizar límites de la gráfica
+        final double minX = 1;
+        final double maxX = meanVelocities.length.toDouble().clamp(4.0, 15.0);
+        
+        final double minVal = meanVelocities.reduce(min);
+        final double maxVal = meanVelocities.reduce(max);
+        
+        final double minY = (minVal - 0.1).clamp(0.1, 1.5);
+        final double maxY = (maxVal + 0.1).clamp(0.8, 2.5);
+
+        return Container(
+          height: 340,
+          padding: const EdgeInsets.all(20),
+          decoration: _panelDecoration(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Rep counter
               Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text('8', style: GoogleFonts.inter(fontSize: 28, fontWeight: FontWeight.w800, color: Colors.white)),
-                  const SizedBox(width: 6),
-                  Text('REPS', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white38, letterSpacing: 1.0)),
+                  Row(
+                    children: [
+                      Text('${meanVelocities.length}', style: GoogleFonts.inter(fontSize: 28, fontWeight: FontWeight.w800, color: Colors.white)),
+                      const SizedBox(width: 6),
+                      Text('REPS', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white38, letterSpacing: 1.0)),
+                    ],
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: colors.tertiary.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '⚡ -${dropOffPctVal.toStringAsFixed(1)}% DROP-OFF',
+                      style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, color: colors.tertiary),
+                    ),
+                  ),
                 ],
               ),
+              const SizedBox(height: 16),
+
+              Expanded(
+                child: LineChart(
+                  LineChartData(
+                    gridData: FlGridData(
+                      show: true,
+                      drawVerticalLine: false,
+                      horizontalInterval: 0.1,
+                      getDrawingHorizontalLine: (value) => FlLine(
+                        color: Colors.white.withValues(alpha: 0.05),
+                        strokeWidth: 1,
+                      ),
+                    ),
+                    titlesData: FlTitlesData(
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          interval: 1,
+                          getTitlesWidget: (value, meta) {
+                            if (value < 1 || value > meanVelocities.length) return const SizedBox();
+                            return Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Text('R${value.toInt()}', style: GoogleFonts.inter(fontSize: 9, color: Colors.white30)),
+                            );
+                          },
+                        ),
+                      ),
+                      leftTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 45,
+                          interval: 0.1,
+                          getTitlesWidget: (value, meta) => Text(
+                            value.toStringAsFixed(1),
+                            style: GoogleFonts.inter(fontSize: 9, color: Colors.white30),
+                          ),
+                        ),
+                      ),
+                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    ),
+                    borderData: FlBorderData(show: false),
+                    minX: minX, maxX: maxX,
+                    minY: minY, maxY: maxY,
+                    lineBarsData: [
+                      LineChartBarData(
+                        spots: mpvSpots,
+                        isCurved: true,
+                        curveSmoothness: 0.25,
+                        color: colors.primary,
+                        barWidth: 3,
+                        isStrokeCapRound: true,
+                        dotData: FlDotData(
+                          show: true,
+                          getDotPainter: (spot, percent, barData, index) {
+                            final isBelow = spot.y <= lossThreshold;
+                            return FlDotCirclePainter(
+                              radius: 4,
+                              color: isBelow ? colors.tertiary : colors.primary,
+                              strokeWidth: 2,
+                              strokeColor: const Color(0xFF141416),
+                            );
+                          },
+                        ),
+                        belowBarData: BarAreaData(
+                          show: true,
+                          color: colors.primary.withValues(alpha: 0.1),
+                        ),
+                      ),
+                    ],
+                    extraLinesData: ExtraLinesData(
+                      horizontalLines: [
+                        HorizontalLine(
+                          y: lossThreshold,
+                          color: colors.tertiary.withValues(alpha: 0.5),
+                          strokeWidth: 1.5,
+                          dashArray: [6, 4],
+                          label: HorizontalLineLabel(
+                            show: true,
+                            alignment: Alignment.topRight,
+                            style: GoogleFonts.inter(fontSize: 9, fontWeight: FontWeight.w600, color: colors.tertiary),
+                            labelResolver: (_) => 'UMBRAL -30%',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+
+              // Dynamic Recommendation
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(
-                  color: colors.tertiary.withValues(alpha: 0.15),
+                  color: colors.tertiary.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: Text(
-                  '⚡ -$dropOffPct% DROP-OFF',
-                  style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, color: colors.tertiary),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          Expanded(
-            child: LineChart(
-              LineChartData(
-                gridData: FlGridData(
-                  show: true,
-                  drawVerticalLine: false,
-                  horizontalInterval: 0.1,
-                  getDrawingHorizontalLine: (value) => FlLine(
-                    color: Colors.white.withValues(alpha: 0.05),
-                    strokeWidth: 1,
-                  ),
-                ),
-                titlesData: FlTitlesData(
-                  bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      interval: 1,
-                      getTitlesWidget: (value, meta) => Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Text('R${value.toInt()}', style: GoogleFonts.inter(fontSize: 9, color: Colors.white30)),
-                      ),
-                    ),
-                  ),
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 45,
-                      interval: 0.1,
-                      getTitlesWidget: (value, meta) => Text(
-                        '${value.toStringAsFixed(1)}',
-                        style: GoogleFonts.inter(fontSize: 9, color: Colors.white30),
-                      ),
-                    ),
-                  ),
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                ),
-                borderData: FlBorderData(show: false),
-                minX: 1, maxX: 8,
-                minY: 0.4, maxY: 0.95,
-                lineBarsData: [
-                  LineChartBarData(
-                    spots: mpvData,
-                    isCurved: true,
-                    curveSmoothness: 0.25,
-                    color: colors.primary,
-                    barWidth: 3,
-                    isStrokeCapRound: true,
-                    dotData: FlDotData(
-                      show: true,
-                      getDotPainter: (spot, percent, barData, index) {
-                        final isBelow = spot.y <= lossThreshold;
-                        return FlDotCirclePainter(
-                          radius: 4,
-                          color: isBelow ? colors.tertiary : colors.primary,
-                          strokeWidth: 2,
-                          strokeColor: const Color(0xFF141416),
-                        );
-                      },
-                    ),
-                    belowBarData: BarAreaData(
-                      show: true,
-                      color: colors.primary.withValues(alpha: 0.1),
-                    ),
-                  ),
-                ],
-                extraLinesData: ExtraLinesData(
-                  horizontalLines: [
-                    HorizontalLine(
-                      y: lossThreshold,
-                      color: colors.tertiary.withValues(alpha: 0.5),
-                      strokeWidth: 1.5,
-                      dashArray: [6, 4],
-                      label: HorizontalLineLabel(
-                        show: true,
-                        alignment: Alignment.topRight,
-                        style: GoogleFonts.inter(fontSize: 9, fontWeight: FontWeight.w600, color: colors.tertiary),
-                        labelResolver: (_) => 'UMBRAL -30%',
+                child: Row(
+                  children: [
+                    Icon(Icons.timer_off_outlined, color: colors.tertiary, size: 14),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        recommendationMsg,
+                        style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: colors.tertiary, height: 1.4),
                       ),
                     ),
                   ],
                 ),
               ),
-            ),
+            ],
           ),
-          const SizedBox(height: 10),
-
-          // Recommendation
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: colors.tertiary.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.timer_off_outlined, color: colors.tertiary, size: 14),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Cortar serie en Rep 7. Fatiga neuromuscular excede el umbral de resistencia segura.',
-                    style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: colors.tertiary, height: 1.4),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

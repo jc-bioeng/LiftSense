@@ -1,12 +1,10 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
 
-/**
- * NativeVideoSync
- * 
- * Dart interface for the high-frequency native synchronization plugin.
- * Streams pulses at ~60Hz to drive the skeleton rendering loop.
- */
+/// NativeVideoSync
+///
+/// Dart interface for the high-frequency native synchronization plugin.
+/// Streams pulses at ~60Hz to drive the skeleton rendering loop.
 class NativeVideoSync {
   static const MethodChannel _methodChannel = MethodChannel('liftsense/video_sync_methods');
   static const EventChannel _eventChannel = EventChannel('liftsense/video_sync_events');

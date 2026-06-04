@@ -6,6 +6,7 @@ import 'l10n/app_localizations.dart';
 import 'ui/dashboard_screen.dart';
 import 'localization/locale_provider.dart';
 import 'utils/video_seeder.dart';
+import 'services/local_database_service.dart';
 
 // Definición global del provider y el observer para simplicidad en este nivel del proyecto
 final LocaleProvider localeProvider = LocaleProvider();
@@ -14,6 +15,7 @@ final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<v
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Hive.initFlutter();
+  await LocalDatabaseService.instance.init();
   
   // Sembrar videos en la primera versión para persistencia local
   await VideoSeeder.seedVideos();

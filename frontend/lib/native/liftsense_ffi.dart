@@ -1,15 +1,16 @@
-/// liftsense_ffi.dart — Dart FFI bindings for the liftsense_core native library.
-///
-/// All heavy computation (CSV parsing, frame lookup, coordinate mapping,
-/// biomechanics) happens in C++; Dart receives only pre-computed results.
-///
-/// Usage:
-///   LiftsenseNative.init('/path/to/tracking.csv');
-///   final frame = LiftsenseNative.queryFrame(timestampMs, vpWidth, vpHeight);
-///   LiftsenseNative.dispose();
+// liftsense_ffi.dart — Dart FFI bindings for the liftsense_core native library.
+//
+// All heavy computation (CSV parsing, frame lookup, coordinate mapping,
+// biomechanics) happens in C++; Dart receives only pre-computed results.
+//
+// Usage:
+//   LiftsenseNative.init('/path/to/tracking.csv');
+//   final frame = LiftsenseNative.queryFrame(timestampMs, vpWidth, vpHeight);
+//   LiftsenseNative.dispose();
 
 import 'dart:ffi';
 import 'dart:io' show Platform;
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
@@ -34,6 +35,18 @@ typedef _ComputeBioBufDart = void Function(Pointer<Uint8>, int);
 // ls_version() → Pointer<Utf8>
 typedef _VersionC = Pointer<Utf8> Function();
 typedef _VersionDart = Pointer<Utf8> Function();
+
+// ls_get_info() → LsTrackInfo
+typedef _GetInfoC = NativeTrackInfo Function();
+typedef _GetInfoDart = NativeTrackInfo Function();
+
+// ls_get_metric_series(metric_id, out_buf, max_len) → int32
+typedef _GetMetricSeriesC = Int32 Function(Int32, Pointer<Float>, Int32);
+typedef _GetMetricSeriesDart = int Function(int, Pointer<Float>, int);
+
+// ls_detect_segments(out_segments, max_len) → int32
+typedef _DetectSegmentsC = Int32 Function(Pointer<NativeSegment>, Int32);
+typedef _DetectSegmentsDart = int Function(Pointer<NativeSegment>, int);
 
 // ─── High-Level Dart Data Classes ───────────────────────────
 
@@ -91,6 +104,10 @@ class NativeBiomechanicsData {
   final double comY;
   final double kneeVelocity;
   final double hipVelocity;
+  final double tibiaAngle;
+  final double hipBias;
+  final int repId;
+  final int phaseType;
 
   const NativeBiomechanicsData({
     required this.status,
@@ -102,6 +119,10 @@ class NativeBiomechanicsData {
     required this.comY,
     required this.kneeVelocity,
     required this.hipVelocity,
+    required this.tibiaAngle,
+    required this.hipBias,
+    required this.repId,
+    required this.phaseType,
   });
 
   bool get isValid => status == 0;
@@ -109,7 +130,33 @@ class NativeBiomechanicsData {
   static const empty = NativeBiomechanicsData(
     status: -1, hipAngle: 0, kneeAngle: 0, ankleAngle: 0,
     trunkAngle: 0, comX: 0, comY: 0, kneeVelocity: 0, hipVelocity: 0,
+    tibiaAngle: 0, hipBias: 0, repId: 0, phaseType: 0,
   );
+}
+
+final class NativeTrackInfo extends Struct {
+  @Int32()
+  external int frameCount;
+  @Int32()
+  external int firstTimestampMs;
+  @Int32()
+  external int lastTimestampMs;
+  @Float()
+  external double videoWidth;
+  @Float()
+  external double videoHeight;
+}
+
+/// Native segment data (Rep/Phase)
+final class NativeSegment extends Struct {
+  @Int32()
+  external int startMs;
+  @Int32()
+  external int endMs;
+  @Int32()
+  external int type; // 0=DESCENDING, 1=BOTTOM, 2=ASCENDING, 3=LOCKOUT
+  @Int32()
+  external int repId;
 }
 
 // ─── Buffer Sizes (must match C struct layouts) ─────────────
@@ -121,8 +168,8 @@ class NativeBiomechanicsData {
 const int _kFrameResultSize = 532;
 
 // LsBiomechanicsResult:
-//   1 × int32 (status) + 8 × float = 36 bytes
-const int _kBioResultSize = 36;
+//   1 × int32 (status) + 10 × float + 2 × int32 = 52 bytes
+const int _kBioResultSize = 52;
 
 // ─── Main API Class ─────────────────────────────────────────
 
@@ -139,6 +186,9 @@ class LiftsenseNative {
   static late _DisposeDart _dispose;
   static late _QueryFrameBufDart _queryFrameBuf;
   static late _ComputeBioBufDart _computeBioBuf;
+  static late _GetMetricSeriesDart _getMetricSeries;
+  static late _DetectSegmentsDart _detectSegments;
+  static late _GetInfoDart _getInfo;
   static late _VersionDart _version;
 
   // Pre-allocated native buffers to avoid per-frame allocation
@@ -167,6 +217,9 @@ class LiftsenseNative {
     _dispose = _lib!.lookupFunction<_DisposeC, _DisposeDart>('ls_dispose');
     _queryFrameBuf = _lib!.lookupFunction<_QueryFrameBufC, _QueryFrameBufDart>('ls_query_frame_buf');
     _computeBioBuf = _lib!.lookupFunction<_ComputeBioBufC, _ComputeBioBufDart>('ls_compute_biomechanics_buf');
+    _getMetricSeries = _lib!.lookupFunction<_GetMetricSeriesC, _GetMetricSeriesDart>('ls_get_metric_series');
+    _detectSegments = _lib!.lookupFunction<_DetectSegmentsC, _DetectSegmentsDart>('ls_detect_segments');
+    _getInfo = _lib!.lookupFunction<_GetInfoC, _GetInfoDart>('ls_get_info');
     _version = _lib!.lookupFunction<_VersionC, _VersionDart>('ls_version');
 
     // Allocate persistent buffers (freed in dispose)
@@ -235,6 +288,19 @@ class LiftsenseNative {
     return _decodeFrameResult(_frameBuf!);
   }
 
+  /// Extracts the flat memory layout (52 floats: frameIndex + 17 points x 3 values)
+  static Float32List extractRawSkeleton(
+    int timestampMs,
+    double viewportWidth,
+    double viewportHeight, {
+    double confThreshold = 0.45,
+  }) {
+    if (!_initialized || _frameBuf == null) return Float32List(0);
+
+    _queryFrameBuf(_frameBuf!, timestampMs, viewportWidth, viewportHeight, confThreshold);
+    return _extractSkeletonBuffer(_frameBuf!);
+  }
+
   /// Compute biomechanical metrics for a specific frame.
   static NativeBiomechanicsData computeBiomechanics(int frameIndex) {
     if (!_initialized || _bioBuf == null) return NativeBiomechanicsData.empty;
@@ -244,10 +310,50 @@ class LiftsenseNative {
     return _decodeBioResult(_bioBuf!);
   }
 
+  /// Extracts the flat metrics layout
+  static Float32List extractRawMetrics(int frameIndex) {
+    if (!_initialized || _bioBuf == null) return Float32List(0);
+    _computeBioBuf(_bioBuf!, frameIndex);
+    return _extractMetricsBuffer(_bioBuf!);
+  }
+
+  /// Returns a full time-series for a metric (e.g. for charts)
+  static Float32List getMetricSeries(int metricId, int maxLen) {
+    _ensureLoaded();
+    final outBuf = calloc<Float>(maxLen);
+    try {
+      final count = _getMetricSeries(metricId, outBuf, maxLen);
+      if (count <= 0) return Float32List(0);
+      return Float32List.fromList(outBuf.asTypedList(count));
+    } finally {
+      calloc.free(outBuf);
+    }
+  }
+
+  /// Detects repetitions and phases automatically
+  static List<NativeSegment> detectSegments({int maxLen = 100}) {
+    _ensureLoaded();
+    final outBuf = calloc<NativeSegment>(maxLen);
+    try {
+      final count = _detectSegments(outBuf, maxLen);
+      if (count <= 0) return [];
+      // Retornamos los structs nativos directamente (viven hasta liberar outBuf)
+      return List.generate(count, (i) => outBuf[i]);
+    } finally {
+      calloc.free(outBuf);
+    }
+  }
+
   /// Get the native library version string.
   static String version() {
     _ensureLoaded();
     return _version().toDartString();
+  }
+
+  /// Get summary info about the loaded tracking data.
+  static NativeTrackInfo getInfo() {
+    _ensureLoaded();
+    return _getInfo();
   }
 
   /// Whether the native engine is currently initialized.
@@ -267,8 +373,8 @@ class LiftsenseNative {
     final points = <SkeletonPoint>[];
     for (int i = 0; i < 17; i++) {
       final baseOffset = 20 + i * 16; // bytes
-      final floats = buf.elementAt(baseOffset).cast<Float>();
-      final validPtr = buf.elementAt(baseOffset + 12).cast<Int32>();
+      final floats = (buf + baseOffset).cast<Float>();
+      final validPtr = (buf + baseOffset + 12).cast<Int32>();
       points.add(SkeletonPoint(
         floats[0], // x
         floats[1], // y
@@ -281,7 +387,7 @@ class LiftsenseNative {
     final connections = <SkeletonConnection>[];
     for (int i = 0; i < 20; i++) {
       final baseOffset = 292 + i * 12;
-      final connInts = buf.elementAt(baseOffset).cast<Int32>();
+      final connInts = (buf + baseOffset).cast<Int32>();
       connections.add(SkeletonConnection(
         connInts[0], // from_idx
         connInts[1], // to_idx
@@ -303,7 +409,7 @@ class LiftsenseNative {
     final status = ints[0];
 
     // Floats start at offset 4 bytes
-    final floats = buf.elementAt(4).cast<Float>();
+    final floats = (buf + 4).cast<Float>();
 
     return NativeBiomechanicsData(
       status: status,
@@ -315,6 +421,57 @@ class LiftsenseNative {
       comY: floats[5],
       kneeVelocity: floats[6],
       hipVelocity: floats[7],
+      tibiaAngle: floats[8],
+      hipBias: floats[9],
+      repId: ints[11],
+      phaseType: ints[12],
     );
+  }
+
+  static Float32List _extractSkeletonBuffer(Pointer<Uint8> buf) {
+    final ints = buf.cast<Int32>();
+    final frameIndex = ints[1];
+
+    // Layout del buffer (532 bytes):
+    //   bytes [0..19]   → 5 × int32 (status, frame_index, timestamp_ms, num_points, num_connections)
+    //   bytes [20..291] → 17 × LsPoint2D (cada uno: float x, float y, float confidence, int32 valid)
+    //
+    // Flat output: [frameIndex, x0,y0,c0,  x1,y1,c1, ... x16,y16,c16] = 52 floats
+    //   donde ci = confidence si valid==1, -1.0 si valid==0 (señal de punto inválido)
+    final flatBuf = Float32List(52); // 1 + 17*3
+    flatBuf[0] = frameIndex.toDouble();
+
+    for (int i = 0; i < 17; i++) {
+      final baseOffset = 20 + i * 16; // LsPoint2D empieza en byte 20
+      final floats   = (buf + baseOffset).cast<Float>();
+      final validPtr = (buf + baseOffset + 12).cast<Int32>(); // int32 valid a offset 12
+      final int vIndex = 1 + i * 3;
+      flatBuf[vIndex]     = floats[0]; // x
+      flatBuf[vIndex + 1] = floats[1]; // y
+      // -1.0 = inválido (filtrado por confianza) → el painter lo omite
+      flatBuf[vIndex + 2] = (validPtr.value != 0) ? floats[2] : -1.0;
+    }
+    return flatBuf;
+  }
+
+  static Float32List _extractMetricsBuffer(Pointer<Uint8> buf) {
+    // Extraemos 12 valores (10 floats + 2 ints como floats)
+    final flatBuf = Float32List(12);
+    final floats = (buf + 4).cast<Float>();
+    final ints = buf.cast<Int32>();
+    
+    flatBuf[0] = floats[0]; // hip
+    flatBuf[1] = floats[1]; // knee
+    flatBuf[2] = floats[2]; // ankle
+    flatBuf[3] = floats[3]; // trunk
+    flatBuf[4] = floats[4]; // comX
+    flatBuf[5] = floats[5]; // comY
+    flatBuf[6] = floats[6]; // kneeVelocity
+    flatBuf[7] = floats[7]; // hipVelocity
+    flatBuf[8] = floats[8]; // tibiaAngle
+    flatBuf[9] = floats[9]; // hipBias
+    flatBuf[10] = ints[11].toDouble(); // repId
+    flatBuf[11] = ints[12].toDouble(); // phaseType
+    return flatBuf;
   }
 }

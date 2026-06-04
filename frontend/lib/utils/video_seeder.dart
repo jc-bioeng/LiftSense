@@ -23,6 +23,21 @@ class VideoSeeder {
           }
         }
       }
+
+      // Sembrar CSVs
+      final csvs = ['lateral_lstrack.csv', 'frontal_lstrack.csv'];
+      for (final csvName in csvs) {
+        final csvFile = File('${docsDir.path}/$csvName');
+        if (!await csvFile.exists()) {
+          try {
+            final byteData = await rootBundle.load('assets/csv/$csvName');
+            await csvFile.writeAsBytes(byteData.buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes));
+            debugPrint('CSV $csvName sembrado exitosamente.');
+          } catch (e) {
+            debugPrint('Error al cargar $csvName desde assets: $e');
+          }
+        }
+      }
     } catch (e) {
       debugPrint('Error general en VideoSeeder: $e');
     }
