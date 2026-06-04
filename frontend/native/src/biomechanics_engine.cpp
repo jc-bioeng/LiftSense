@@ -37,6 +37,17 @@ inline RawPoint midpoint(const RawPoint& a, const RawPoint& b) {
     };
 }
 
+// Inclination of a segment relative to the vertical axis (0 = vertical)
+inline float compute_segment_inclination(const RawPoint& start, const RawPoint& end, float conf_threshold) {
+    if (!valid(start, conf_threshold) || !valid(end, conf_threshold)) {
+        return -1.0f;
+    }
+    float dx = std::abs(end.x - start.x);
+    float dy = std::abs(end.y - start.y);
+    if (dy < 1e-6f) return 90.0f;
+    return std::atan(dx / dy) * (180.0f / kPI);
+}
+
 } // anonymous namespace
 
 float compute_joint_angle(const RawPoint& a, const RawPoint& vertex, const RawPoint& b,
@@ -165,19 +176,32 @@ BiomechanicsResult analyze_frame(const FrameRecord& frame, float conf_threshold)
         result.ankle_angle = compute_joint_angle(pts[9], pts[11], pts[15], conf_threshold);
     }
 
-    // Trunk angle: vertical reference vs shoulder→hip
-    // Approximate: nose(0) → midpoint(shoulders) → midpoint(hips)
-    if (valid(pts[0], conf_threshold) && 
-        valid(pts[1], conf_threshold) && valid(pts[2], conf_threshold) &&
-        valid(pts[7], conf_threshold) && valid(pts[8], conf_threshold)) {
+    // ── New: Trunk Inclination (Vertical Ref) ────────────────
+    // mid_hip → mid_shoulder
+    float trunk_incl = -1.0f;
+    if (valid(pts[1], 0.3f) && valid(pts[2], 0.3f) &&
+        valid(pts[7], 0.3f) && valid(pts[8], 0.3f)) {
         RawPoint mid_sh = midpoint(pts[1], pts[2]);
         RawPoint mid_hip = midpoint(pts[7], pts[8]);
-        result.trunk_angle = compute_joint_angle(pts[0], mid_sh, mid_hip, 0.0f);
+        trunk_incl = compute_segment_inclination(mid_hip, mid_sh, 0.3f);
+        result.trunk_angle = trunk_incl; // Use inclination for bias/display
     }
+
 
     // Center of mass
     result.valid = compute_center_of_mass(frame, conf_threshold, 
                                            result.com_x, result.com_y);
+
+    // ── New: Tibia Inclination & Hip Bias ────────────────────
+    // Tibia: knee → ankle (relaxed threshold for metrics)
+    result.tibia_angle = compute_segment_inclination(pts[10], pts[12], 0.3f);
+    if (result.tibia_angle < 0) {
+        result.tibia_angle = compute_segment_inclination(pts[9], pts[11], 0.3f);
+    }
+
+    if (result.tibia_angle >= 0 && trunk_incl >= 0) {
+        result.hip_bias = trunk_incl - result.tibia_angle;
+    }
 
     return result;
 }

@@ -38,6 +38,7 @@ std::vector<liftsense::FrameRecord> g_frames;
 liftsense::CoordinateMapper g_mapper;
 float g_video_w = 1080.0f;
 float g_video_h = 1920.0f;
+std::vector<LsSegment> g_segments;
 
 // Connection topology — matches the Dart SkeletonPainterView exactly
 struct ConnectionDef {
@@ -189,6 +190,18 @@ EXPORT LsBiomechanicsResult ls_compute_biomechanics(int32_t frame_index) {
     result.com_x = bio.com_x;
     result.com_y = bio.com_y;
 
+    // Assign rep_id and phase_type from pre-detected segments
+    result.rep_id = 0;
+    result.phase_type = -1;
+    int32_t frame_ms = g_frames[frame_index].timestamp_ms;
+    for (const auto& s : g_segments) {
+        if (frame_ms >= s.start_ms && frame_ms <= s.end_ms) {
+            result.rep_id = s.rep_id;
+            result.phase_type = s.type;
+            break;
+        }
+    }
+
     // Angular velocities — need previous frame
     if (frame_index > 0) {
         auto prev = liftsense::analyze_frame(g_frames[frame_index - 1]);
@@ -202,6 +215,9 @@ EXPORT LsBiomechanicsResult ls_compute_biomechanics(int32_t frame_index) {
                 prev.hip_angle, bio.hip_angle, dt);
         }
     }
+
+    result.tibia_angle = bio.tibia_angle;
+    result.hip_bias = bio.hip_bias;
 
     return result;
 }
@@ -239,8 +255,114 @@ EXPORT void ls_compute_biomechanics_buf(void* out_buf, int32_t frame_index) {
     memcpy(out_buf, &result, sizeof(LsBiomechanicsResult));
 }
 
+EXPORT int32_t ls_get_metric_series(int32_t metric_id, float* out_buf, int32_t max_len) {
+    if (!g_initialized || !out_buf) return -1;
+    
+    int32_t count = std::min(static_cast<int32_t>(g_frames.size()), max_len);
+    for (int32_t i = 0; i < count; i++) {
+        auto bio = liftsense::analyze_frame(g_frames[i]);
+        float val = 0.0f;
+        switch (metric_id) {
+            case 0: val = bio.hip_angle; break;
+            case 1: val = bio.knee_angle; break;
+            case 2: val = bio.ankle_angle; break;
+            case 3: val = bio.trunk_angle; break;
+            case 8: val = bio.tibia_angle; break;
+            case 9: val = bio.hip_bias; break;
+            default: val = 0.0f;
+        }
+        out_buf[i] = val;
+    }
+    return count;
+}
+
+EXPORT int32_t ls_detect_segments(LsSegment* out_segments, int32_t max_len) {
+    if (!g_initialized || !out_segments || max_len < 1) return -1;
+
+    std::vector<float> depths;
+    for (const auto& f : g_frames) {
+        float x, y;
+        if (liftsense::compute_center_of_mass(f, 0.45f, x, y)) {
+            depths.push_back(y);
+        } else {
+            depths.push_back(depths.empty() ? 0.0f : depths.back());
+        }
+    }
+
+    if (depths.size() < 10) return 0;
+
+    // Detect basic reps based on depth thresholding
+    // We look for "valleys" in Y (since Y increases downwards)
+    float min_d = 1e9, max_d = -1e9;
+    for (float d : depths) {
+        if (d < min_d) min_d = d;
+        if (d > max_d) max_d = d;
+    }
+    
+    float range = max_d - min_d;
+    if (range < 50.0f) return 0; // Not enough movement
+
+    float threshold = min_d + range * 0.3f; // Start of rep
+    float deep_threshold = min_d + range * 0.7f; // Bottom area
+
+    int32_t seg_count = 0;
+    int32_t rep_id = 1;
+    bool in_rep = false;
+    int state = 3; // 3=LOCKOUT
+
+    for (size_t i = 1; i < depths.size(); i++) {
+        if (seg_count >= max_len) break;
+
+        float d = depths[i];
+        float prev_d = depths[i-1];
+        float vel = d - prev_d;
+
+        int new_state = state;
+        if (d > threshold) {
+            if (!in_rep) {
+                in_rep = true;
+                new_state = 0; // DESCENDING
+            } else {
+                if (d > deep_threshold) {
+                    new_state = 1; // BOTTOM
+                } else if (vel < -2.0f) {
+                    new_state = 2; // ASCENDING
+                }
+            }
+        } else {
+            if (in_rep) {
+                in_rep = false;
+                new_state = 3; // LOCKOUT
+                rep_id++;
+            }
+        }
+
+        if (new_state != state || i == 1) {
+            // Close previous segment
+            if (seg_count > 0) {
+                out_segments[seg_count-1].end_ms = g_frames[i].timestamp_ms;
+            }
+            
+            // Start new segment
+            out_segments[seg_count].start_ms = g_frames[i].timestamp_ms;
+            out_segments[seg_count].end_ms = g_frames[i].timestamp_ms + 33; // default
+            out_segments[seg_count].type = new_state;
+            out_segments[seg_count].rep_id = rep_id;
+            
+            state = new_state;
+            seg_count++;
+        }
+    }
+    
+    if (seg_count > 0) {
+        out_segments[seg_count-1].end_ms = g_frames.back().timestamp_ms;
+    }
+
+    return seg_count;
+}
+
 EXPORT const char* ls_version(void) {
-    return "liftsense_core 1.0.0";
+    return "liftsense_core 1.2.0-segments";
 }
 
 } // extern "C"

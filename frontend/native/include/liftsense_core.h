@@ -72,8 +72,12 @@ typedef struct {
     float    trunk_angle;      // Degrees
     float    com_x;            // Center of mass viewport X
     float    com_y;            // Center of mass viewport Y
-    float    knee_velocity;    // Degrees/second (0 if insufficient frames)
+    float    knee_velocity;    // Degrees/second
     float    hip_velocity;     // Degrees/second
+    float    tibia_angle;      // Degrees relative to vertical
+    float    hip_bias;         // Difference (trunk - tibia)
+    int32_t  rep_id;           // Current repetition index (1-based, 0 if none)
+    int32_t  phase_type;       // Current phase (0=Desc, 1=Bottom, 2=Asc, 3=Lock)
 } LsBiomechanicsResult;
 
 /** Summary information about the loaded tracking data. */
@@ -84,6 +88,14 @@ typedef struct {
     float    video_width;
     float    video_height;
 } LsTrackInfo;
+
+/** A discrete segment of the movement (phase or repetition). */
+typedef struct {
+    int32_t start_ms;
+    int32_t end_ms;
+    int32_t type;   // 0=DESCENDING, 1=BOTTOM, 2=ASCENDING, 3=LOCKOUT
+    int32_t rep_id;
+} LsSegment;
 
 // ─── API Functions ──────────────────────────────────────────
 
@@ -161,10 +173,21 @@ EXPORT void ls_query_frame_buf(
 );
 
 /**
- * Buffer-based variant of ls_compute_biomechanics.
- * Writes LsBiomechanicsResult into a caller-provided buffer (min 36 bytes).
+ * Get the entire time-series for a specific metric.
+ * @param metric_id 0=hip, 1=knee, 2=ankle, 3=trunk, 8=tibia, 9=hip_bias
+ * @param out_buf   Caller-provided float buffer
+ * @param max_len   Maximum number of floats to write
+ * @return Number of floats written, or negative on error.
  */
-EXPORT void ls_compute_biomechanics_buf(void* out_buf, int32_t frame_index);
+EXPORT int32_t ls_get_metric_series(int32_t metric_id, float* out_buf, int32_t max_len);
+
+/**
+ * Detect repetitions and phases in the loaded movement.
+ * @param out_segments Caller-provided LsSegment buffer
+ * @param max_len      Maximum number of segments to write
+ * @return Number of segments detected, or negative on error.
+ */
+EXPORT int32_t ls_detect_segments(LsSegment* out_segments, int32_t max_len);
 
 #ifdef __cplusplus
 }

@@ -20,6 +20,8 @@ struct BiomechanicsResult {
     float trunk_angle = 0.0f;
     float com_x = 0.0f;
     float com_y = 0.0f;
+    float tibia_angle = 0.0f; // New
+    float hip_bias = 0.0f;    // New (trunk - tibia)
     bool  valid = false;
 };
 
